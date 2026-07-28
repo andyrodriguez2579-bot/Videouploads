@@ -5,7 +5,7 @@ import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, lt } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import {
@@ -26,6 +26,7 @@ import {
   type RenderPlan,
 } from "@/domain/render";
 import type { RenderKind } from "@/domain/types";
+import { enqueueRender } from "@/lib/queue";
 import { getRenderProvider } from "@/lib/render";
 import { buildObjectKey, getStorage } from "@/lib/storage";
 
@@ -77,9 +78,12 @@ export async function previewRender(
  *
  * Returns as soon as the rows exist: a five-minute episode takes far longer to
  * encode than a request should be held open, and the render centre already
- * polls the job row for progress. Moving this to BullMQ (so a render survives a
- * restart, and retries are automatic) is the next slice — `render_jobs` already
- * carries `external_job_id`, `attempt` and `max_attempts` for it.
+ * polls the job row for progress.
+ *
+ * Where the work then runs depends on `REDIS_URL`. With it, the render goes to
+ * a BullMQ worker that survives a restart and retries on failure. Without it,
+ * it runs in this process — which is fine on a laptop, and is why Redis stays
+ * optional rather than becoming a hard dependency of rendering at all.
  */
 export async function startRender(input: {
   episodeId: string;
@@ -135,10 +139,23 @@ export async function startRender(input: {
 
   if (!job) throw new Error("Could not create the render job.");
 
-  // Fire and forget: the job row is the record of progress from here on.
-  void runRenderJob(render.id).catch((error) => {
-    console.error("[renders] job crashed outside its own handler", { renderId: render.id, error });
-  });
+  // With Redis configured the work is handed to a worker that survives a
+  // restart. Without it, run in-process: the job row is still the record of
+  // progress, but an interrupted render is orphaned until reclaimed.
+  const queuedJobId = await enqueueRender(render.id);
+  if (queuedJobId) {
+    await db
+      .update(renderJobs)
+      .set({ externalJobId: queuedJobId, stage: "Waiting for a worker", updatedAt: new Date() })
+      .where(eq(renderJobs.id, job.id));
+  } else {
+    void runRenderJob(render.id).catch((error) => {
+      console.error("[renders] job crashed outside its own handler", {
+        renderId: render.id,
+        error,
+      });
+    });
+  }
 
   return { renderId: render.id, jobId: job.id };
 }
@@ -272,6 +289,58 @@ export async function runRenderJob(renderId: string): Promise<void> {
       // Losing a temp directory is not worth surfacing to the operator.
     });
   }
+}
+
+/**
+ * How long a job may sit in `running` without its progress moving before it is
+ * presumed dead. Comfortably longer than a slow encode's gap between segments.
+ */
+export const STALE_RENDER_MINUTES = 30;
+
+/**
+ * Fails jobs left `running` by a process that died mid-encode.
+ *
+ * Only `running` is reclaimed, never `queued`: with a worker configured a job
+ * legitimately waits in `queued` until one picks it up, and failing those would
+ * break the very durability this exists to provide. Progress updates keep
+ * `updated_at` moving, so a live render is never mistaken for a dead one.
+ */
+export async function reclaimStaleRenders(
+  olderThanMinutes: number = STALE_RENDER_MINUTES,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanMinutes * 60_000);
+  const message =
+    "The process running this render stopped before it finished. Start it again.";
+
+  const stale = await db
+    .select({ id: renderJobs.id, renderId: renderJobs.renderId })
+    .from(renderJobs)
+    .where(and(eq(renderJobs.status, "running"), lt(renderJobs.updatedAt, cutoff)));
+
+  if (stale.length === 0) return 0;
+
+  const now = new Date();
+  await db
+    .update(renderJobs)
+    .set({ status: "failed", stage: "Interrupted", errorMessage: message, finishedAt: now, updatedAt: now })
+    .where(
+      inArray(
+        renderJobs.id,
+        stale.map((row) => row.id),
+      ),
+    );
+
+  await db
+    .update(renders)
+    .set({ status: "failed", errorMessage: message, updatedAt: now })
+    .where(
+      inArray(
+        renders.id,
+        stale.map((row) => row.renderId),
+      ),
+    );
+
+  return stale.length;
 }
 
 /**

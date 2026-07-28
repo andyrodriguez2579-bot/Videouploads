@@ -18,8 +18,9 @@ services:
       timeout: 5s
       retries: 10
 
-  # Needed from Milestone 2 for BullMQ. Started under the `jobs` profile so the
-  # Milestone 1 workflow does not depend on it:  docker compose up -d db
+  # Renders go through BullMQ when REDIS_URL is set. Kept behind the `jobs`
+  # profile because rendering works without it — the app just runs the encode
+  # in-process instead:  docker compose --profile jobs up -d redis worker
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -64,8 +65,34 @@ services:
       STORAGE_DRIVER: local
       LOCAL_STORAGE_PATH: /app/storage
       PUBLISHING_MODE: mock
+      # Empty by default: renders then run in-process. Point it at the redis
+      # service to hand them to the worker below instead.
+      REDIS_URL: ${REDIS_URL:-}
     ports:
       - "3000:3000"
+    volumes:
+      - app_storage:/app/storage
+
+  # Consumes the render queue. Only useful with REDIS_URL set, and it shares the
+  # storage volume with the app because it writes the finished MP4 there.
+  worker:
+    build: .
+    profiles: ["jobs"]
+    restart: unless-stopped
+    command: ["npm", "run", "worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://historia:historia@db:5432/historia
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+      STORAGE_DRIVER: local
+      LOCAL_STORAGE_PATH: /app/storage
+      PUBLISHING_MODE: mock
+      REDIS_URL: redis://redis:6379
     volumes:
       - app_storage:/app/storage
 

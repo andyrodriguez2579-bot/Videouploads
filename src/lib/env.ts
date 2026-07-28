@@ -201,6 +201,11 @@ export function describeEnv() {
       PUBLISHING_MODE: raw.PUBLISHING_MODE ?? "mock",
       FFMPEG_PATH: raw.FFMPEG_PATH ?? "ffmpeg",
       REDIS_URL: raw.REDIS_URL ? "(set)" : "(unset)",
+      // What that actually means for an operator, rather than making them infer
+      // it: without Redis a render dies with the process that started it.
+      RENDER_JOBS: raw.REDIS_URL
+        ? "queued — survives a restart, needs `npm run worker`"
+        : "in-process — no worker needed, lost on restart",
     },
     secrets: {
       DATABASE_URL: present("DATABASE_URL"),

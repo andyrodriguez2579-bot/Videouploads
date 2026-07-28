@@ -20,10 +20,11 @@ RUN npm run build
 FROM node:20-bookworm-slim AS runner
 WORKDIR /app
 
-# ffmpeg is unused in Milestone 1 but installed here so the image is ready for
-# the render pipeline without a rebuild of the base layer.
+# ffmpeg encodes the renders. fonts-dejavu-core is not optional alongside it:
+# the slim base ships no fonts at all, and ffmpeg's drawtext filter needs a real
+# font file, so without this every render fails at the point it draws a heading.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production

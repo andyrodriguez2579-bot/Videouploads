@@ -51,6 +51,9 @@ the episode's Details tab. The target first workflow is:
   `FFPROBE_PATH` if they are not on `PATH`.
 - A font for on-screen text — any DejaVu, Liberation or FreeFont package.
   Debian/Ubuntu: `apt-get install fonts-dejavu-core`.
+- **Redis — optional.** Without it renders run inside the app process; with it
+  they are queued to a worker that survives a restart. See
+  [Render jobs](#render-jobs).
 
 ## Quick start
 
@@ -95,6 +98,30 @@ step. The only extension required is `pgcrypto`, which the migration creates.
 
 ```bash
 docker compose --profile app up --build
+```
+
+### Render jobs
+
+Rendering works out of the box with nothing extra running — the encode happens
+inside the app process. That is fine on a laptop; the only cost is that a
+restart mid-encode loses the render.
+
+For anything longer-lived, set `REDIS_URL` and run a worker:
+
+```bash
+docker compose --profile jobs up -d redis    # or your own Redis
+# .env: REDIS_URL=redis://localhost:6379
+npm run worker
+```
+
+Renders are then queued, survive restarts, and retry three times with backoff.
+A job whose process died is failed after 30 minutes with an explanation rather
+than sitting at `running` forever. The Settings page shows which mode is live.
+
+In containers, both at once:
+
+```bash
+docker compose --profile app --profile jobs up --build
 ```
 
 ---
@@ -171,6 +198,7 @@ npm run db:reset         # DROP the public schema (development only)
 npm run test             # vitest — workflow and render-planning rules
 npm run test:e2e         # playwright — approval, uploads, rendering
 npm run render:sample    # render a demo MP4 with no database involved
+npm run worker           # render worker (only when REDIS_URL is set)
 ```
 
 `render:sample` is the quickest way to check the local FFmpeg toolchain:
@@ -414,12 +442,49 @@ Verified from a clean database: typecheck, lint, 41 unit tests, production build
 13 e2e tests including one that renders an actual MP4 and asserts the served
 bytes carry an `ftyp` box.
 
+### 2026-07-28 — Milestone 2, second slice: durable render jobs
+
+Renders can now go through BullMQ + Redis and survive a restart.
+
+**Decision: Redis stays optional.** Making it required would have broken the
+promise this project is built on — that the whole thing runs with no extra
+services. So `REDIS_URL` selects the behaviour and nothing else in the codebase
+changes shape:
+
+| `REDIS_URL` | Where a render runs | Cost |
+|---|---|---|
+| unset | in the app process | nothing to run; a restart mid-encode loses it |
+| set | BullMQ worker (`npm run worker`) | survives restarts, retries 3× with backoff |
+
+The Settings page states which mode is live in those words, rather than making
+an operator infer it from "(set)".
+
+**Stale-render reclaim.** A job left `running` by a process that died is failed
+after 30 minutes with an explanation, on worker start. Only `running` is
+reclaimed, never `queued` — with a worker configured a job legitimately waits in
+`queued`, and failing those would break the durability this exists to add.
+Progress updates keep `updated_at` moving, so a live render is never mistaken
+for a dead one; verified against a live database with one dead and one healthy
+render, which reclaimed exactly one.
+
+The worker imports the same `server-only`-guarded modules the app uses, via
+Node's `react-server` resolve condition (`tsx --conditions=react-server`). No
+parallel copy of the orchestration, and the guard still protects the client
+bundle.
+
+Two things this slice found:
+
+- **The Docker image had ffmpeg but no fonts.** `drawtext` needs a real font
+  file, and the slim base ships none, so every containerised render would have
+  failed at the moment it drew a heading. `fonts-dejavu-core` is now installed
+  beside ffmpeg.
+- **BullMQ pulls an optional Valkey client** that is not installed, which put
+  `Can't resolve @valkey/valkey-glide` warnings on every build. `bullmq` and
+  `ioredis` are now server-external — that noise is where a real module error
+  goes to hide.
+
 ### Next — the rest of Milestone 2
 
-- **BullMQ + Redis.** Renders currently run in-process after the request
-  returns, so a restart mid-render leaves a job stuck at `running`.
-  `render_jobs` already carries `external_job_id`, `attempt` and `max_attempts`
-  for this; Redis is already in `docker-compose.yml` under the `jobs` profile.
 - **Narration audio**, mixed and loudness-normalised in the same job. Segments
   already carry a silent stereo track so the mix has somewhere to go.
 - **Subtitles** — SRT/VTT import, then faster-whisper timing locally.
