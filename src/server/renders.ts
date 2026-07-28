@@ -1,0 +1,407 @@
+import "server-only";
+
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { and, asc, eq, inArray } from "drizzle-orm";
+
+import { db } from "@/db/client";
+import {
+  episodes,
+  episodeVersions,
+  mediaAssets,
+  renderJobs,
+  renders,
+  sceneAssets,
+  scenes,
+  series,
+} from "@/db/schema";
+import {
+  assessRender,
+  buildRenderPlan,
+  type AspectRatio,
+  type PlannedScene,
+  type RenderPlan,
+} from "@/domain/render";
+import type { RenderKind } from "@/domain/types";
+import { getRenderProvider } from "@/lib/render";
+import { buildObjectKey, getStorage } from "@/lib/storage";
+
+/**
+ * Rendering orchestration: assemble the plan from the database, create the
+ * render and job rows, run the encoder, and store the result.
+ *
+ * The job row is written before any encoding starts, so a render that dies
+ * mid-way leaves a visible failed record rather than nothing at all. Progress
+ * is persisted rather than held in memory for the same reason — the render
+ * centre reads it straight from the table.
+ */
+
+/** Visual roles that can supply a scene's background still, best first. */
+const BACKGROUND_ROLES = ["primary", "background", "map"] as const;
+const BACKGROUND_KINDS = ["image", "map"] as const;
+
+export interface RenderPreview {
+  plan: RenderPlan;
+  canRender: boolean;
+  blockers: string[];
+  warnings: string[];
+}
+
+/**
+ * Builds the plan for an episode without starting anything, so the UI can show
+ * what a render *would* produce — runtime, scene count, outstanding warnings.
+ */
+export async function previewRender(
+  episodeId: string,
+  aspectRatio: AspectRatio,
+): Promise<RenderPreview> {
+  const { plannedScenes, targetWindow } = await loadPlanInputs(episodeId, aspectRatio);
+  const plan = buildRenderPlan(plannedScenes, { aspectRatio });
+  const decision = assessRender(
+    {
+      sceneCount: plannedScenes.length,
+      scenesWithoutDuration: plannedScenes.filter((s) => s.estimatedSeconds === null).length,
+      targetWindow,
+    },
+    plan,
+  );
+
+  return { plan, ...decision };
+}
+
+/**
+ * Creates the render and job rows and kicks the encoder off in the background.
+ *
+ * Returns as soon as the rows exist: a five-minute episode takes far longer to
+ * encode than a request should be held open, and the render centre already
+ * polls the job row for progress. Moving this to BullMQ (so a render survives a
+ * restart, and retries are automatic) is the next slice — `render_jobs` already
+ * carries `external_job_id`, `attempt` and `max_attempts` for it.
+ */
+export async function startRender(input: {
+  episodeId: string;
+  kind: RenderKind;
+  aspectRatio: AspectRatio;
+  label?: string | null;
+}): Promise<{ renderId: string; jobId: string }> {
+  const preview = await previewRender(input.episodeId, input.aspectRatio);
+  if (!preview.canRender) {
+    throw new Error(preview.blockers.join(" "));
+  }
+
+  // Pin the script version this render was built from, so an approved episode
+  // can never be confused with a render of a later draft.
+  const [latestVersion] = await db
+    .select({ id: episodeVersions.id })
+    .from(episodeVersions)
+    .where(eq(episodeVersions.episodeId, input.episodeId))
+    .orderBy(asc(episodeVersions.versionNumber))
+    .limit(1);
+
+  const [render] = await db
+    .insert(renders)
+    .values({
+      episodeId: input.episodeId,
+      episodeVersionId: latestVersion?.id ?? null,
+      kind: input.kind,
+      aspectRatio: input.aspectRatio,
+      label: input.label ?? null,
+      status: "queued",
+      storageDriver: getStorage().name,
+      details: {
+        plannedSeconds: preview.plan.totalSeconds,
+        sceneCount: preview.plan.segments.length,
+        warnings: preview.warnings,
+      },
+    })
+    .returning();
+
+  if (!render) throw new Error("Could not create the render record.");
+
+  const [job] = await db
+    .insert(renderJobs)
+    .values({
+      renderId: render.id,
+      queueName: "renders",
+      externalJobId: randomUUID(),
+      status: "queued",
+      progress: 0,
+      stage: "Queued",
+    })
+    .returning();
+
+  if (!job) throw new Error("Could not create the render job.");
+
+  // Fire and forget: the job row is the record of progress from here on.
+  void runRenderJob(render.id).catch((error) => {
+    console.error("[renders] job crashed outside its own handler", { renderId: render.id, error });
+  });
+
+  return { renderId: render.id, jobId: job.id };
+}
+
+/**
+ * Runs one queued render to completion. Exported so a queue worker can call it
+ * directly once BullMQ lands, and so it can be driven from a script.
+ */
+export async function runRenderJob(renderId: string): Promise<void> {
+  const [render] = await db.select().from(renders).where(eq(renders.id, renderId)).limit(1);
+  if (!render) return;
+
+  const [job] = await db
+    .select()
+    .from(renderJobs)
+    .where(eq(renderJobs.renderId, renderId))
+    .limit(1);
+
+  const started = new Date();
+  await db
+    .update(renders)
+    .set({ status: "running", updatedAt: started })
+    .where(eq(renders.id, renderId));
+  if (job) {
+    await db
+      .update(renderJobs)
+      .set({
+        status: "running",
+        attempt: job.attempt + 1,
+        startedAt: started,
+        stage: "Preparing",
+        updatedAt: started,
+      })
+      .where(eq(renderJobs.id, job.id));
+  }
+
+  const aspectRatio = (render.aspectRatio === "9:16" ? "9:16" : "16:9") as AspectRatio;
+  const workDir = await mkdtemp(path.join(tmpdir(), "historia-job-"));
+
+  try {
+    const { plannedScenes } = await loadPlanInputs(render.episodeId, aspectRatio);
+    const plan = buildRenderPlan(plannedScenes, { aspectRatio });
+    if (plan.segments.length === 0) throw new Error("The episode has no scenes to render.");
+
+    const storage = getStorage();
+    const outputPath = path.join(workDir, "render.mp4");
+
+    const result = await getRenderProvider().render({
+      plan,
+      outputPath,
+      resolveAsset: (key) => stageAsset(storage, key, workDir),
+      onProgress: async (progress) => {
+        if (!job) return;
+        const percent = Math.min(
+          99,
+          Math.round((progress.completed / Math.max(progress.total, 1)) * 100),
+        );
+        await db
+          .update(renderJobs)
+          .set({ progress: percent, stage: progress.stage, updatedAt: new Date() })
+          .where(eq(renderJobs.id, job.id));
+      },
+    });
+
+    const objectKey = buildObjectKey({
+      scope: "episodes",
+      scopeId: render.episodeId,
+      category: "renders",
+      filename: `${render.kind}-${aspectRatio.replace(":", "x")}.mp4`,
+    });
+
+    const stored = await storage.put({
+      key: objectKey,
+      body: await readFile(result.outputPath),
+      contentType: result.mimeType,
+    });
+
+    const finished = new Date();
+    await db
+      .update(renders)
+      .set({
+        status: "succeeded",
+        objectKey: stored.key,
+        storageDriver: stored.driver,
+        mimeType: result.mimeType,
+        byteSize: stored.byteSize,
+        durationSeconds: String(result.durationSeconds),
+        width: result.width,
+        height: result.height,
+        errorMessage: null,
+        updatedAt: finished,
+      })
+      .where(eq(renders.id, renderId));
+
+    if (job) {
+      await db
+        .update(renderJobs)
+        .set({
+          status: "succeeded",
+          progress: 100,
+          stage: "Complete",
+          log: result.log,
+          finishedAt: finished,
+          updatedAt: finished,
+        })
+        .where(eq(renderJobs.id, job.id));
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "The render failed.";
+    const finished = new Date();
+
+    await db
+      .update(renders)
+      .set({ status: "failed", errorMessage: message, updatedAt: finished })
+      .where(eq(renders.id, renderId));
+
+    if (job) {
+      await db
+        .update(renderJobs)
+        .set({
+          status: "failed",
+          stage: "Failed",
+          errorMessage: message,
+          finishedAt: finished,
+          updatedAt: finished,
+        })
+        .where(eq(renderJobs.id, job.id));
+    }
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {
+      // Losing a temp directory is not worth surfacing to the operator.
+    });
+  }
+}
+
+/**
+ * Copies a stored object to a local file the encoder can read. Going through
+ * the storage driver rather than touching the filesystem keeps this working
+ * unchanged when assets live in S3.
+ */
+async function stageAsset(
+  storage: ReturnType<typeof getStorage>,
+  key: string,
+  workDir: string,
+): Promise<string | null> {
+  try {
+    const body = await storage.get(key);
+    const localPath = path.join(workDir, `asset-${path.basename(key)}`);
+    await writeFile(localPath, body);
+    return localPath;
+  } catch {
+    // A missing still must not fail the whole render — the scene falls back to
+    // a plain card, which is visibly wrong in the output rather than silently.
+    return null;
+  }
+}
+
+/**
+ * Reads everything the planner needs: ordered scenes, each scene's background
+ * still, and the series duration window for this episode's format.
+ */
+async function loadPlanInputs(
+  episodeId: string,
+  aspectRatio: AspectRatio,
+): Promise<{
+  plannedScenes: PlannedScene[];
+  targetWindow: { minSeconds: number; maxSeconds: number } | null;
+}> {
+  const sceneRows = await db
+    .select()
+    .from(scenes)
+    .where(eq(scenes.episodeId, episodeId))
+    .orderBy(asc(scenes.position));
+
+  const backgrounds = await loadBackgroundKeys(sceneRows.map((scene) => scene.id));
+
+  const plannedScenes: PlannedScene[] = sceneRows.map((scene) => ({
+    id: scene.id,
+    position: scene.position,
+    heading: scene.heading,
+    onScreenText: scene.onScreenText,
+    narrationText: scene.narrationText,
+    template: scene.template,
+    estimatedSeconds: scene.estimatedSeconds === null ? null : Number(scene.estimatedSeconds),
+    backgroundKey: backgrounds.get(scene.id) ?? null,
+  }));
+
+  return {
+    plannedScenes,
+    targetWindow: await loadTargetWindow(episodeId, aspectRatio),
+  };
+}
+
+/** The best available still per scene, preferring the `primary` role. */
+async function loadBackgroundKeys(sceneIds: string[]): Promise<Map<string, string>> {
+  const keys = new Map<string, string>();
+  if (sceneIds.length === 0) return keys;
+
+  const rows = await db
+    .select({
+      sceneId: sceneAssets.sceneId,
+      role: sceneAssets.role,
+      position: sceneAssets.position,
+      objectKey: mediaAssets.objectKey,
+      kind: mediaAssets.kind,
+    })
+    .from(sceneAssets)
+    .innerJoin(mediaAssets, eq(mediaAssets.id, sceneAssets.assetId))
+    .where(
+      and(
+        inArray(sceneAssets.sceneId, sceneIds),
+        inArray(mediaAssets.kind, [...BACKGROUND_KINDS]),
+        inArray(sceneAssets.role, [...BACKGROUND_ROLES]),
+      ),
+    );
+
+  const rank = (role: string) => {
+    const index = BACKGROUND_ROLES.indexOf(role as (typeof BACKGROUND_ROLES)[number]);
+    return index === -1 ? BACKGROUND_ROLES.length : index;
+  };
+
+  const best = new Map<string, { rank: number; position: number; key: string }>();
+  for (const row of rows) {
+    const candidate = { rank: rank(row.role), position: row.position, key: row.objectKey };
+    const current = best.get(row.sceneId);
+    if (
+      !current ||
+      candidate.rank < current.rank ||
+      (candidate.rank === current.rank && candidate.position < current.position)
+    ) {
+      best.set(row.sceneId, candidate);
+    }
+  }
+
+  for (const [sceneId, chosen] of best) keys.set(sceneId, chosen.key);
+  return keys;
+}
+
+/** The series window for this episode's format, when the series defines one. */
+async function loadTargetWindow(
+  episodeId: string,
+  aspectRatio: AspectRatio,
+): Promise<{ minSeconds: number; maxSeconds: number } | null> {
+  const [row] = await db
+    .select({
+      primaryFormat: episodes.primaryFormat,
+      longMin: series.longFormTargetMinSeconds,
+      longMax: series.longFormTargetMaxSeconds,
+      shortMin: series.shortFormTargetMinSeconds,
+      shortMax: series.shortFormTargetMaxSeconds,
+    })
+    .from(episodes)
+    .innerJoin(series, eq(series.id, episodes.seriesId))
+    .where(eq(episodes.id, episodeId))
+    .limit(1);
+
+  if (!row) return null;
+
+  // A vertical render is a short by definition, whatever the episode's own
+  // format says — that is the frame it will be published in.
+  const isShort = aspectRatio === "9:16" || row.primaryFormat === "short_form";
+  const min = isShort ? row.shortMin : row.longMin;
+  const max = isShort ? row.shortMax : row.longMax;
+
+  return min !== null && max !== null ? { minSeconds: min, maxSeconds: max } : null;
+}

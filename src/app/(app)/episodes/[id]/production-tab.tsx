@@ -1,4 +1,5 @@
 import { Badge, EmptyState, MilestoneNotice } from "@/components/ui";
+import { RenderPanel, type RenderRow } from "./render-panel";
 import {
   CAPTION_MODE_LABELS,
   NARRATION_MODE_LABELS,
@@ -13,11 +14,14 @@ import {
  * where the audio can be probed and loudness-normalised in the same job.
  */
 export function ProductionTab({
+  episodeId,
   narrationMode,
   captionMode,
   voiceovers,
   captions,
   renderCount,
+  renders,
+  renderPlan,
 }: {
   episodeId: string;
   narrationMode: NarrationMode;
@@ -40,9 +44,26 @@ export function ProductionTab({
     humanReviewed: boolean;
   }[];
   renderCount: number;
+  renders: RenderRow[];
+  renderPlan: {
+    plannedSeconds: number;
+    sceneCount: number;
+    canRender: boolean;
+    blockers: string[];
+    warnings: string[];
+  };
 }) {
   return (
     <div className="space-y-6">
+      <RenderPanel
+        episodeId={episodeId}
+        renders={renders}
+        plannedSeconds={renderPlan.plannedSeconds}
+        sceneCount={renderPlan.sceneCount}
+        canRender={renderPlan.canRender}
+        blockers={renderPlan.blockers}
+        warnings={renderPlan.warnings}
+      />
       <section className="card">
         <h2 className="mb-3 font-serif text-lg font-semibold">Chosen method</h2>
         <dl className="grid gap-3 sm:grid-cols-2 text-sm">

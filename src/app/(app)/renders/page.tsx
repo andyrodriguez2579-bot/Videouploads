@@ -27,20 +27,21 @@ export default async function RenderCenterPage() {
         <div className="space-y-6">
           <EmptyState
             title="No renders yet"
-            description="Render records appear here once the pipeline is built."
+            description="Start one from an episode's Production tab."
           />
-          <MilestoneNotice milestone="Milestone 2 — not built yet">
-            <p>The pipeline will run entirely on your own machine:</p>
-            <ul className="mt-2 list-disc space-y-1 pl-5">
-              <li>Remotion for the 16:9 documentary and 9:16 vertical templates</li>
-              <li>FFmpeg for encoding, loudness normalisation and thumbnails</li>
-              <li>BullMQ + Redis for retry-safe background jobs with progress</li>
-              <li>faster-whisper for subtitle timing, Piper for optional narration</li>
-            </ul>
-            <p className="mt-2">
-              None of it requires a paid API. The <code>renders</code> and <code>render_jobs</code>{" "}
-              tables already exist, so nothing here needs a schema change.
+          <MilestoneNotice milestone="Milestone 2 — partly built">
+            <p>
+              Rendering works and runs entirely on your own machine: scenes become an MP4 in
+              16:9 or 9:16 via FFmpeg, with progress and errors recorded per job. It needs no
+              paid API and no account.
             </p>
+            <p className="mt-2">Still to come in this milestone:</p>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              <li>BullMQ + Redis, so a render survives a restart and retries itself</li>
+              <li>Narration audio mixed in, with loudness normalisation</li>
+              <li>faster-whisper for subtitle timing, Piper for optional narration</li>
+              <li>Richer scene templates, including Ken Burns motion on stills</li>
+            </ul>
           </MilestoneNotice>
         </div>
       ) : (

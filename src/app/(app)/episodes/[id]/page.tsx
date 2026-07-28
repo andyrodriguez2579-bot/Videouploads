@@ -4,6 +4,7 @@ import { desc, eq } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import { auditLog } from "@/db/schema";
+import { previewRender } from "@/server/renders";
 import { Alert, Badge, PageHeader, StatusBadge } from "@/components/ui";
 import { getSessionUser } from "@/lib/auth/session";
 import {
@@ -76,6 +77,7 @@ export default async function EpisodePage({
     voiceoverRows,
     captionRows,
     renderRows,
+    renderPreview,
     translations,
     history,
   ] = await Promise.all([
@@ -92,6 +94,8 @@ export default async function EpisodePage({
     listVoiceovers(id),
     listCaptions(id),
     listRenders(id),
+    // 16:9 is what the Render panel defaults to, so the preview matches it.
+    previewRender(id, "16:9"),
     listTranslations(id),
     db.select().from(auditLog).where(eq(auditLog.episodeId, id)).orderBy(desc(auditLog.createdAt)).limit(50),
   ]);
@@ -297,6 +301,25 @@ export default async function EpisodePage({
                 humanReviewed: c.humanReviewed,
               }))}
               renderCount={renderRows.length}
+              renders={renderRows.map(({ render, progress, stage, jobError }) => ({
+                id: render.id,
+                kind: render.kind,
+                aspectRatio: render.aspectRatio,
+                status: render.status,
+                objectKey: render.objectKey,
+                durationSeconds: render.durationSeconds,
+                byteSize: render.byteSize,
+                errorMessage: render.errorMessage ?? jobError,
+                progress,
+                stage,
+              }))}
+              renderPlan={{
+                plannedSeconds: renderPreview.plan.totalSeconds,
+                sceneCount: renderPreview.plan.segments.length,
+                canRender: renderPreview.canRender,
+                blockers: renderPreview.blockers,
+                warnings: renderPreview.warnings,
+              }}
             />
           ) : null}
 

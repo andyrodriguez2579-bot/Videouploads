@@ -13,7 +13,8 @@ review.
 uploaded anywhere without an explicit human approval, recorded against the exact
 script version approved.**
 
-Milestone 1 (the editorial foundation) is implemented. Milestones 2–5 are not.
+Milestone 1 (the editorial foundation) is implemented. Milestone 2 (rendering) is
+partly implemented: scenes render to a real MP4 locally. Milestones 3–5 are not.
 
 ---
 
@@ -45,7 +46,11 @@ the episode's Details tab. The target first workflow is:
 
 - **Node.js 20.11+** and npm
 - **Docker** (for local Postgres) — or any Postgres 14+ you already have
-- FFmpeg (only needed from Milestone 2)
+- **FFmpeg** (with `ffprobe`) — required to render. Debian/Ubuntu:
+  `apt-get install ffmpeg`; macOS: `brew install ffmpeg`. Set `FFMPEG_PATH` /
+  `FFPROBE_PATH` if they are not on `PATH`.
+- A font for on-screen text — any DejaVu, Liberation or FreeFont package.
+  Debian/Ubuntu: `apt-get install fonts-dejavu-core`.
 
 ## Quick start
 
@@ -107,7 +112,7 @@ docker compose --profile app up --build
 | `/review` | Built — review queue with per-episode blockers |
 | `/assets` | Built — asset library, licence records, uploads |
 | `/settings` | Built — environment and provider status, read-only |
-| `/renders` | Placeholder for Milestone 2 |
+| `/renders` | Built — render centre with per-job progress, errors and outputs |
 | `/calendar`, `/social` | Placeholder for Milestone 4 |
 | `/analytics` | Placeholder for Milestone 5 |
 
@@ -163,23 +168,40 @@ npm run env:check        # validate .env without starting the app
 npm run db:migrate       # apply drizzle/*.sql
 npm run db:seed          # owner/editor accounts + demo episode
 npm run db:reset         # DROP the public schema (development only)
-npm run test             # vitest — workflow rules
-npm run test:e2e         # playwright — approval workflow
+npm run test             # vitest — workflow and render-planning rules
+npm run test:e2e         # playwright — approval, uploads, rendering
+npm run render:sample    # render a demo MP4 with no database involved
+```
+
+`render:sample` is the quickest way to check the local FFmpeg toolchain:
+
+```bash
+npm run render:sample -- ./sample.mp4            # 16:9 colour cards
+npm run render:sample -- ./tall.mp4 9:16         # vertical
+npm run render:sample -- ./still.mp4 16:9 photo.jpg   # over a real still
 ```
 
 ## Testing
 
 **Unit** — [`src/domain/workflow.test.ts`](src/domain/workflow.test.ts) covers the
-state machine and every approval gate.
+state machine and every approval gate;
+[`src/domain/render.test.ts`](src/domain/render.test.ts) covers scene timing,
+caption selection, aspect-ratio dimensions and the render warnings.
 
 ```bash
 npm run test
 ```
 
-**End to end** — [`tests/e2e/approval-workflow.spec.ts`](tests/e2e/approval-workflow.spec.ts)
-drives a real browser through: anonymous redirect, blocked submission, the full
-draft → review → approved path, approval withdrawal on script edit, and the
-editor-cannot-approve role gate. Needs a migrated and seeded database.
+**End to end** — three Playwright suites drive a real browser, against a migrated
+and seeded database:
+
+- [`approval-workflow.spec.ts`](tests/e2e/approval-workflow.spec.ts) — anonymous
+  redirect, blocked submission, the full draft → review → approved path, approval
+  withdrawal on script edit, and the editor-cannot-approve role gate.
+- [`asset-upload.spec.ts`](tests/e2e/asset-upload.spec.ts) — upload, storage,
+  read-back through the guarded file route, and its two refusals.
+- [`render.spec.ts`](tests/e2e/render.spec.ts) — renders an episode to an actual
+  MP4 and checks the served bytes really are one. Needs FFmpeg.
 
 ```bash
 npm run test:e2e:install   # once
@@ -351,11 +373,58 @@ the route refuses both an unknown key and a signed-out caller.
 
 Verified green: typecheck, lint, 20 unit tests, production build, 10 e2e tests.
 
-### Next — Milestone 2: rendering pipeline
+### 2026-07-28 — Milestone 2, first slice: episodes render to real video
 
-Remotion templates, FFmpeg encoding and loudness normalisation, BullMQ + Redis
-jobs with progress and retry, local sample render with no paid API, subtitle
-import and faster-whisper generation.
+An episode's scene plan now becomes a watchable MP4, entirely on the local
+machine. Scene → segment → concatenated film, in 16:9 or 9:16, with per-job
+progress, and the output served back through the same guarded route as uploads.
+
+**Decision: FFmpeg first, Remotion behind the same seam.** The milestone plan
+named Remotion, and it is still the right tool for motion and richer templates.
+It is also a large dependency that drives a headless browser, and its licence is
+not free for larger companies. Getting *watchable output* mattered more than
+getting the final renderer, so this slice encodes with FFmpeg alone, behind a
+`RenderProvider` interface that mirrors the existing auth and storage seams.
+`renders.template` already carries a per-render template id for the day Remotion
+lands beside it.
+
+**Decision: one segment per scene, not one filter graph.** Encoding each scene
+separately and concatenating with `-c copy` is what makes progress reporting and
+useful errors possible — a 40-scene episode reports 40 steps, and a failure names
+the scene that caused it rather than dumping an unreadable graph. Peak memory
+stays flat regardless of episode length.
+
+**Decision: rendering is not gated on approval.** Approval governs *publishing*;
+you cannot sensibly approve a cut you have never watched. What a render does
+record is the script version it was built from, so an approved episode can never
+be confused with a render of a later draft. The only thing that blocks a render
+is having no scenes. Runtime drift against the series target warns, exactly as it
+does in review.
+
+Text is passed to `drawtext` via `textfile=` rather than inline. Headings
+legitimately contain colons, apostrophes and commas — all filter-graph
+metacharacters — and escaping them by hand is the kind of thing that works until
+someone writes a real title.
+
+Rendering surfaced one integration gap: `/api/files/*` only served keys backed by
+a `media_assets` row, so a finished render 404ed. That guard was right to refuse
+— it now resolves renders too, and nothing else.
+
+Verified from a clean database: typecheck, lint, 41 unit tests, production build,
+13 e2e tests including one that renders an actual MP4 and asserts the served
+bytes carry an `ftyp` box.
+
+### Next — the rest of Milestone 2
+
+- **BullMQ + Redis.** Renders currently run in-process after the request
+  returns, so a restart mid-render leaves a job stuck at `running`.
+  `render_jobs` already carries `external_job_id`, `attempt` and `max_attempts`
+  for this; Redis is already in `docker-compose.yml` under the `jobs` profile.
+- **Narration audio**, mixed and loudness-normalised in the same job. Segments
+  already carry a silent stereo track so the mix has somewhere to go.
+- **Subtitles** — SRT/VTT import, then faster-whisper timing locally.
+- **Richer templates** — Ken Burns motion on stills, and per-template layouts
+  rather than one shared lower-third.
 
 ---
 
