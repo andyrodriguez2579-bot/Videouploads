@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  body {
+    @apply bg-parchment text-ink antialiased;
+  }
+
+  /* Visible focus on every interactive element — keyboard users must always be
+     able to see where they are. */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    @apply outline-none ring-2 ring-indigo-700 ring-offset-2 ring-offset-parchment;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-lg border border-black/10 bg-white p-5 shadow-sm;
+  }
+
+  .label {
+    @apply mb-1 block text-sm font-medium text-ink;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-black/20 bg-white px-3 py-2 text-sm text-ink
+           placeholder:text-black/40 disabled:bg-black/5;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium
+           transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-indigo-700 text-white hover:bg-indigo-800;
+  }
+
+  .btn-secondary {
+    @apply btn border border-black/20 bg-white text-ink hover:bg-black/5;
+  }
+
+  .btn-danger {
+    @apply btn border border-red-700 bg-white text-red-800 hover:bg-red-50;
+  }
+
+  .link {
+    @apply text-indigo-700 underline underline-offset-2 hover:text-indigo-800;
+  }
+}
+
+/* Screen-reader-only text that becomes visible on focus (skip link). */
+.sr-only-focusable:not(:focus):not(:focus-within) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

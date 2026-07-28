@@ -1,0 +1,76 @@
+name: historia-dominicana-studio
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: historia
+      POSTGRES_PASSWORD: historia
+      POSTGRES_DB: historia
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U historia -d historia"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Needed from Milestone 2 for BullMQ. Started under the `jobs` profile so the
+  # Milestone 1 workflow does not depend on it:  docker compose up -d db
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["jobs"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Optional S3-compatible storage for exercising STORAGE_DRIVER=s3 without a
+  # cloud account:  docker compose --profile s3 up -d
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    profiles: ["s3"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: historia
+      MINIO_ROOT_PASSWORD: historia-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  # The app itself. Local development normally runs `npm run dev` on the host
+  # and only uses `db` from here; this service is for a container-only run:
+  #   docker compose --profile app up --build
+  app:
+    build: .
+    profiles: ["app"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      APP_URL: http://localhost:3000
+      DATABASE_URL: postgres://historia:historia@db:5432/historia
+      AUTH_PROVIDER: local
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+      STORAGE_DRIVER: local
+      LOCAL_STORAGE_PATH: /app/storage
+      PUBLISHING_MODE: mock
+    ports:
+      - "3000:3000"
+    volumes:
+      - app_storage:/app/storage
+
+volumes:
+  db_data:
+  redis_data:
+  minio_data:
+  app_storage:

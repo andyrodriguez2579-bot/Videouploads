@@ -1,0 +1,23 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+test-results/
+playwright-report/
+.tsbuildinfo
+*.tsbuildinfo
+next-env.d.ts
+
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Local development storage (uploaded scripts, audio, stills, renders)
+storage/
+!storage/.gitkeep
+
+.DS_Store
+Thumbs.db
