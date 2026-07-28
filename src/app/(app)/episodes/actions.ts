@@ -84,6 +84,7 @@ export async function createEpisodeAction(
         episodeNumber: data.episodeNumber ?? null,
         synopsis: data.synopsis ?? null,
         language: data.language,
+        primaryFormat: data.primaryFormat,
         periodLabel: data.periodLabel ?? null,
         periodStartYear: data.periodStartYear ?? null,
         periodEndYear: data.periodEndYear ?? null,
@@ -167,6 +168,123 @@ export async function updateEpisodeAction(
   } catch (error) {
     return { error: toMessage(error, "Could not save the episode.") };
   }
+}
+
+/**
+ * Creates the other-language version of an episode.
+ *
+ * A translation is its own episode row with its own approval — a translation
+ * can be wrong in ways the original is not, so it must be signed off separately.
+ * The scene plan and research sources are COPIED (so the translator has the
+ * structure and the citations to work from), while media assets stay shared:
+ * the same archival still is the same file in both languages, and duplicating
+ * it would duplicate the licence obligation too.
+ *
+ * The script itself is deliberately NOT copied. It starts empty so nobody can
+ * mistake an untranslated Spanish script for an approved English one.
+ */
+export async function createTranslationAction(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  let newEpisodeId: string;
+
+  try {
+    const user = await assertEditor();
+    const sourceId = String(formData.get("episodeId") ?? "");
+    const language = String(formData.get("language") ?? "");
+
+    if (language !== "es" && language !== "en") {
+      return { error: "Choose either Spanish or English." };
+    }
+
+    const [source] = await db.select().from(episodes).where(eq(episodes.id, sourceId)).limit(1);
+    if (!source) return { error: "Episode not found." };
+
+    if (source.translationOfId) {
+      return {
+        error:
+          "This episode is already a translation. Create further languages from the original episode.",
+      };
+    }
+    if (source.language === language) {
+      return { error: `This episode is already in ${language === "es" ? "Spanish" : "English"}.` };
+    }
+
+    const created = await db.transaction(async (tx) => {
+      const [episode] = await tx
+        .insert(episodes)
+        .values({
+          seriesId: source.seriesId,
+          episodeNumber: source.episodeNumber,
+          slug: `${source.slug}-${language}`,
+          title: source.title,
+          synopsis: source.synopsis,
+          language,
+          translationOfId: source.id,
+          primaryFormat: source.primaryFormat,
+          periodLabel: source.periodLabel,
+          periodStartYear: source.periodStartYear,
+          periodEndYear: source.periodEndYear,
+          narrationMode: source.narrationMode,
+          captionMode: source.captionMode,
+          scenePlanMode: source.scenePlanMode,
+          publishMode: source.publishMode,
+          targetDurationSeconds: source.targetDurationSeconds,
+          // Always starts as a draft, whatever state the original is in.
+          status: "draft",
+          createdBy: user.id,
+        })
+        .returning();
+
+      if (!episode) throw new Error("Could not create the translation.");
+
+      // Copy sources, keeping their fact-check state: the underlying research
+      // is the same regardless of the language it is narrated in.
+      await tx.execute(raw`
+        insert into research_sources (
+          episode_id, citation, source_type, author, publisher, publication_year,
+          url, archive_reference, supports_claim, page_reference, verification,
+          verified_by, verified_at, notes
+        )
+        select ${episode.id}, citation, source_type, author, publisher, publication_year,
+               url, archive_reference, supports_claim, page_reference, verification,
+               verified_by, verified_at, notes
+        from research_sources where episode_id = ${source.id}
+      `);
+
+      // Copy the scene skeleton — headings, templates, timings and visual
+      // direction carry over; the narration text does not, since that is the
+      // part that must actually be translated.
+      await tx.execute(raw`
+        insert into scenes (
+          episode_id, position, heading, on_screen_text, visual_direction,
+          template, estimated_seconds, is_ai_suggested, human_reviewed, notes
+        )
+        select ${episode.id}, position, heading, on_screen_text, visual_direction,
+               template, estimated_seconds, false, true, notes
+        from scenes where episode_id = ${source.id}
+      `);
+
+      return episode;
+    });
+
+    await recordAudit({
+      actor: user,
+      action: "episode.create_translation",
+      entityType: "episode",
+      entityId: created.id,
+      episodeId: created.id,
+      summary: `Created the ${language === "es" ? "Spanish" : "English"} version of "${source.title}"`,
+      after: { translationOfId: source.id, language },
+    });
+
+    newEpisodeId = created.id;
+  } catch (error) {
+    return { error: toMessage(error, "Could not create the translation.") };
+  }
+
+  redirect(`/episodes/${newEpisodeId}?tab=script`);
 }
 
 // ---------------------------------------------------------------------------

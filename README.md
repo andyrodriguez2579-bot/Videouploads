@@ -1,8 +1,13 @@
-# Historia Dominicana Studio
+# Historia of Dominicana — Studio
 
 Editorial and production workspace for a documentary series on the history of the
-Dominican Republic. Scripts, sources, licences, scene plans and assets live here;
-rendering and publishing are layered on top in later milestones.
+Dominican Republic, produced in **Spanish and English**. Scripts, sources,
+licences, scene plans and assets live here; rendering and publishing are layered
+on top in later milestones.
+
+**Format targets:** 4–6 minutes for the YouTube cut, 50–90 seconds for social
+bites. Both are configured per series and shown against the scene plan during
+review.
 
 **One rule the whole system is built around: nothing is scheduled, published, or
 uploaded anywhere without an explicit human approval, recorded against the exact
@@ -288,6 +293,32 @@ Drizzle, Zod) rather than via `create-next-app`, and implemented:
   so a swap can happen inside one transaction without a temporary position hack.
 - *Milestone 2–5 tables exist but are unused.* Their pages say so plainly rather
   than pretending to work.
+
+### 2026-07-27 — Bilingual episodes and duration targets
+
+Owner decisions landed: the series is **Historia of Dominicana**, produced in
+**Spanish and English**, targeting **4–6 minutes** on YouTube and **50–90 second**
+social bites. Migration `0001` implements them.
+
+- `series` gained four duration-target columns (long-form and short-form windows,
+  each with a CHECK that max ≥ min).
+- `episodes` gained `translation_of_id` (self-reference), `primary_format`
+  (`long_form` | `short_form`), a partial unique index preventing two translations
+  into the same language, and a CHECK stopping an episode being its own translation.
+- The review panel shows planned runtime against the target window, and the
+  workflow emits a **warning — never a block** — when the scene plan drifts
+  outside it. An episode that earns its length should not be stopped by a rule.
+- "Create Spanish/English version" on the episode page copies the scene skeleton
+  and every research source, shares media assets, and leaves the script empty.
+
+**Decision: a translation is its own episode row, not a language column.** Each
+language gets its own human approval, because a translation can be wrong where
+the original is right. Script versions, narration, captions and renders all hang
+off `episode_id` already, so they follow for free. Assets stay shared — the same
+archival still is the same file and the same licence obligation in both languages.
+The script is deliberately *not* copied, so an untranslated Spanish draft can
+never be mistaken for approved English copy. Translation graphs are kept one
+level deep so "the original" is never ambiguous.
 
 ### Next — Milestone 2: rendering pipeline
 

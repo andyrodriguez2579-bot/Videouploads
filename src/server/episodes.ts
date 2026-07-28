@@ -208,6 +208,9 @@ export async function getReadiness(episodeId: string): Promise<EpisodeReadiness>
     uncleared_assets: number;
     unreviewed_ai_scenes: number;
     has_approved_version: boolean;
+    planned_seconds: number;
+    target_min_seconds: number | null;
+    target_max_seconds: number | null;
   }>(raw`
     select
       exists (select 1 from episode_versions v where v.episode_id = ${episodeId}) as has_script,
@@ -228,7 +231,20 @@ export async function getReadiness(episodeId: string): Promise<EpisodeReadiness>
       (select count(*) from scenes s
         where s.episode_id = ${episodeId}
           and s.is_ai_suggested = true and s.human_reviewed = false)::int as unreviewed_ai_scenes,
-      (select e.approved_version_id is not null from episodes e where e.id = ${episodeId}) as has_approved_version
+      (select e.approved_version_id is not null from episodes e where e.id = ${episodeId}) as has_approved_version,
+      coalesce((select sum(s.estimated_seconds) from scenes s where s.episode_id = ${episodeId}), 0)::float8 as planned_seconds,
+      -- The target window depends on whether this row is the long-form cut or a
+      -- standalone social bite.
+      (select case when e.primary_format = 'short_form'
+                   then sr.short_form_target_min_seconds
+                   else sr.long_form_target_min_seconds end
+         from episodes e join series sr on sr.id = e.series_id
+        where e.id = ${episodeId}) as target_min_seconds,
+      (select case when e.primary_format = 'short_form'
+                   then sr.short_form_target_max_seconds
+                   else sr.long_form_target_max_seconds end
+         from episodes e join series sr on sr.id = e.series_id
+        where e.id = ${episodeId}) as target_max_seconds
   `);
 
   return {
@@ -240,7 +256,33 @@ export async function getReadiness(episodeId: string): Promise<EpisodeReadiness>
     unclearedAssetCount: Number(row?.uncleared_assets ?? 0),
     unreviewedAiSceneCount: Number(row?.unreviewed_ai_scenes ?? 0),
     hasApprovedVersion: Boolean(row?.has_approved_version),
+    plannedSeconds: Number(row?.planned_seconds ?? 0),
+    targetMinSeconds: row?.target_min_seconds != null ? Number(row.target_min_seconds) : null,
+    targetMaxSeconds: row?.target_max_seconds != null ? Number(row.target_max_seconds) : null,
   };
+}
+
+/**
+ * The other language versions of an episode: its original (if this row is a
+ * translation) and every translation of the original.
+ */
+export async function listTranslations(episodeId: string) {
+  return db.execute<{
+    id: string;
+    title: string;
+    language: string;
+    status: string;
+    is_original: boolean;
+  }>(raw`
+    with root as (
+      select coalesce(translation_of_id, id) as root_id from episodes where id = ${episodeId}
+    )
+    select e.id, e.title, e.language, e.status, (e.translation_of_id is null) as is_original
+    from episodes e, root
+    where (e.id = root.root_id or e.translation_of_id = root.root_id)
+      and e.id <> ${episodeId}
+    order by e.translation_of_id nulls first, e.language
+  `);
 }
 
 /** Counts for the dashboard tiles. */

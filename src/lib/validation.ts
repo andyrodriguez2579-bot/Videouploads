@@ -46,6 +46,8 @@ export const episodeCreateSchema = z.object({
   episodeNumber: z.coerce.number().int().min(0).max(9999).optional(),
   synopsis: optionalText(2000),
   language: z.enum(["es", "en"]).default("es"),
+  // long_form = the 4–6 minute YouTube cut; short_form = a standalone social bite.
+  primaryFormat: z.enum(["long_form", "short_form"]).default("long_form"),
   periodLabel: optionalText(120),
   periodStartYear: yearSchema,
   periodEndYear: yearSchema,

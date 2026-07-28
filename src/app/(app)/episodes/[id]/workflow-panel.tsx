@@ -53,8 +53,19 @@ export function WorkflowPanel({
   const [state, action] = useActionState<ActionState, FormData>(transitionEpisodeAction, {});
   const actions = availableActions(status);
 
+  const { plannedSeconds, targetMinSeconds, targetMaxSeconds } = readiness;
+  const hasTarget = targetMinSeconds != null && targetMaxSeconds != null;
+  const inWindow =
+    hasTarget && plannedSeconds >= targetMinSeconds! && plannedSeconds <= targetMaxSeconds!;
+
+  const formatSeconds = (total: number) => {
+    const rounded = Math.round(total);
+    const minutes = Math.floor(rounded / 60);
+    return minutes > 0 ? `${minutes}m ${rounded % 60}s` : `${rounded}s`;
+  };
+
   return (
-    <div className="space-y-4 xl:sticky xl:top-6">
+    <div className="space-y-4">
       <section className="card">
         <h2 className="mb-3 font-serif text-lg font-semibold">Readiness</h2>
         <ul className="space-y-1.5 text-sm">
@@ -76,6 +87,24 @@ export function WorkflowPanel({
               : ""}
           </Check>
         </ul>
+
+        {hasTarget ? (
+          <div className="mt-3 rounded-md bg-black/[0.03] p-2.5 text-sm">
+            <p className="flex items-baseline justify-between gap-2">
+              <span className="text-black/60">Planned runtime</span>
+              <span className="font-semibold tabular-nums">{formatSeconds(plannedSeconds)}</span>
+            </p>
+            <p className="mt-0.5 text-xs text-black/60">
+              Target {formatSeconds(targetMinSeconds!)}–{formatSeconds(targetMaxSeconds!)}
+              {plannedSeconds === 0 ? " · no scene timings entered yet" : ""}
+            </p>
+            {plannedSeconds > 0 && !inWindow ? (
+              <p className="mt-1 text-xs font-medium text-amber-800">
+                Outside the target window — a warning, not a blocker.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         {readiness.unresolvedSourceCount > 0 ? (
           <p className="mt-3 text-xs text-amber-800">

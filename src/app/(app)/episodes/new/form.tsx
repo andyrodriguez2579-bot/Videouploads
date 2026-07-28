@@ -61,13 +61,28 @@ export function NewEpisodeForm({ series }: { series: { id: string; title: string
           >
             <input id="episodeNumber" name="episodeNumber" type="number" min={0} className="input" />
           </Field>
-          <Field label="Language" name="language">
+          <Field
+            label="Language"
+            name="language"
+            hint="Create the other language from the episode page once this one exists."
+          >
             <select id="language" name="language" className="input" defaultValue="es">
               <option value="es">Spanish</option>
               <option value="en">English</option>
             </select>
           </Field>
         </div>
+
+        <Field
+          label="Format"
+          name="primaryFormat"
+          hint="Long form targets 4–6 minutes for YouTube; short form targets 50–90 seconds."
+        >
+          <select id="primaryFormat" name="primaryFormat" className="input" defaultValue="long_form">
+            <option value="long_form">Long form — YouTube (4–6 min)</option>
+            <option value="short_form">Short form — social bite (50–90 s)</option>
+          </select>
+        </Field>
 
         <Field label="Synopsis" name="synopsis" error={state.fields?.synopsis}>
           <textarea id="synopsis" name="synopsis" rows={3} className="input" />

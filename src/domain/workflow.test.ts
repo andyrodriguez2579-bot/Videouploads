@@ -16,6 +16,9 @@ const ready: EpisodeReadiness = {
   unclearedAssetCount: 0,
   unreviewedAiSceneCount: 0,
   hasApprovedVersion: false,
+  plannedSeconds: 300,
+  targetMinSeconds: 240,
+  targetMaxSeconds: 360,
 };
 
 describe("evaluateTransition", () => {
@@ -80,6 +83,30 @@ describe("evaluateTransition", () => {
     });
     expect(result.allowed).toBe(true);
     expect(result.warnings.join(" ")).toContain("unverified");
+  });
+
+  it("warns when the scene plan is under the target runtime but still approves", () => {
+    const result = evaluateTransition("in_review", "approve", { ...ready, plannedSeconds: 120 });
+    expect(result.allowed).toBe(true);
+    expect(result.warnings.join(" ")).toContain("under the 4m 0s target minimum");
+  });
+
+  it("warns when the scene plan runs over the target runtime", () => {
+    const result = evaluateTransition("in_review", "approve", { ...ready, plannedSeconds: 500 });
+    expect(result.allowed).toBe(true);
+    expect(result.warnings.join(" ")).toContain("over the 6m 0s target maximum");
+  });
+
+  it("is silent about runtime inside the target window", () => {
+    const result = evaluateTransition("in_review", "approve", { ...ready, plannedSeconds: 300 });
+    expect(result.warnings.join(" ")).not.toContain("target");
+  });
+
+  it("applies the short-form window when that is the episode's format", () => {
+    const short = { ...ready, plannedSeconds: 140, targetMinSeconds: 50, targetMaxSeconds: 90 };
+    const result = evaluateTransition("in_review", "approve", short);
+    expect(result.allowed).toBe(true);
+    expect(result.warnings.join(" ")).toContain("over the 1m 30s target maximum");
   });
 
   it("only allows scheduling from approved with a recorded approval", () => {

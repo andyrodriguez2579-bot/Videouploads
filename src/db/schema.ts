@@ -67,6 +67,11 @@ export const series = pgTable("series", {
   brandPrimary: text("brand_primary").notNull().default("#4338ca"),
   brandSecondary: text("brand_secondary").notNull().default("#f7f4ed"),
   defaultAttribution: text("default_attribution"),
+  // Advisory duration windows: 4–6 min YouTube cut, 50–90 s social bites.
+  longFormTargetMinSeconds: integer("long_form_target_min_seconds").notNull().default(240),
+  longFormTargetMaxSeconds: integer("long_form_target_max_seconds").notNull().default(360),
+  shortFormTargetMinSeconds: integer("short_form_target_min_seconds").notNull().default(50),
+  shortFormTargetMaxSeconds: integer("short_form_target_max_seconds").notNull().default(90),
   createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
@@ -84,6 +89,9 @@ export const episodes = pgTable(
     title: text("title").notNull(),
     synopsis: text("synopsis"),
     language: text("language").notNull().default("es"),
+    /** NULL = an original. Set = this row is a translation of that episode. */
+    translationOfId: uuid("translation_of_id"),
+    primaryFormat: text("primary_format").$type<"long_form" | "short_form">().notNull().default("long_form"),
     periodLabel: text("period_label"),
     periodStartYear: integer("period_start_year"),
     periodEndYear: integer("period_end_year"),
@@ -105,6 +113,7 @@ export const episodes = pgTable(
     statusIdx: index("episodes_status_idx").on(t.status),
     seriesIdx: index("episodes_series_idx").on(t.seriesId, t.episodeNumber),
     slugUnique: uniqueIndex("episodes_series_id_slug_key").on(t.seriesId, t.slug),
+    translationIdx: index("episodes_translation_of_idx").on(t.translationOfId),
   }),
 );
 

@@ -59,6 +59,19 @@ export interface EpisodeReadiness {
   unreviewedAiSceneCount: number;
   /** True once a human has explicitly approved a version. */
   hasApprovedVersion: boolean;
+  /** Sum of the scene plan's estimated seconds. */
+  plannedSeconds: number;
+  /** Series duration window for this episode's format. Advisory, never blocking. */
+  targetMinSeconds: number | null;
+  targetMaxSeconds: number | null;
+}
+
+/** Formats a second count as "5m 20s" for reviewer-facing messages. */
+function formatSeconds(total: number): string {
+  const rounded = Math.round(total);
+  const minutes = Math.floor(rounded / 60);
+  const seconds = rounded % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 export interface TransitionResult {
@@ -129,6 +142,26 @@ function gateWarnings(action: TransitionAction, r: EpisodeReadiness): string[] {
   if (action === "approve" && r.wordCount < 150) {
     warnings.push("Script is unusually short for a documentary episode.");
   }
+
+  // Runtime drift is a note, not a gate: a 6m40s episode that earns its length
+  // should not be blocked, but the reviewer should see it before signing off.
+  if (
+    (action === "approve" || action === "submit_for_review") &&
+    r.plannedSeconds > 0 &&
+    r.targetMinSeconds != null &&
+    r.targetMaxSeconds != null
+  ) {
+    if (r.plannedSeconds < r.targetMinSeconds) {
+      warnings.push(
+        `Scene plan runs ${formatSeconds(r.plannedSeconds)}, under the ${formatSeconds(r.targetMinSeconds)} target minimum.`,
+      );
+    } else if (r.plannedSeconds > r.targetMaxSeconds) {
+      warnings.push(
+        `Scene plan runs ${formatSeconds(r.plannedSeconds)}, over the ${formatSeconds(r.targetMaxSeconds)} target maximum.`,
+      );
+    }
+  }
+
   return warnings;
 }
 

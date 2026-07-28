@@ -75,17 +75,28 @@ async function main() {
       on conflict (email) do nothing
     `;
 
+    // Duration windows: a 4–6 minute YouTube cut, and 50–90 second social bites.
     const [series] = await sql<{ id: string }[]>`
-      insert into series (slug, title, description, language, default_attribution, created_by)
+      insert into series (
+        slug, title, description, language, default_attribution, created_by,
+        long_form_target_min_seconds, long_form_target_max_seconds,
+        short_form_target_min_seconds, short_form_target_max_seconds
+      )
       values (
-        'historia-dominicana',
-        'Historia Dominicana',
-        ${`${PLACEHOLDER} Documentary series covering the history of the Dominican Republic from its earliest period to the present.`},
+        'historia-of-dominicana',
+        'Historia of Dominicana',
+        ${`${PLACEHOLDER} Documentary series covering the history of the Dominican Republic from its earliest period to the present. Produced in Spanish and English.`},
         'es',
         ${`${PLACEHOLDER} Series attribution line`},
-        ${ownerId}
+        ${ownerId},
+        240, 360, 50, 90
       )
-      on conflict (slug) do update set title = excluded.title
+      on conflict (slug) do update set
+        title = excluded.title,
+        long_form_target_min_seconds = excluded.long_form_target_min_seconds,
+        long_form_target_max_seconds = excluded.long_form_target_max_seconds,
+        short_form_target_min_seconds = excluded.short_form_target_min_seconds,
+        short_form_target_max_seconds = excluded.short_form_target_max_seconds
       returning id
     `;
     const seriesId = series!.id;
@@ -101,7 +112,7 @@ async function main() {
 
     const [episode] = await sql<{ id: string }[]>`
       insert into episodes (
-        series_id, episode_number, slug, title, synopsis, language,
+        series_id, episode_number, slug, title, synopsis, language, primary_format,
         period_label, narration_mode, caption_mode, scene_plan_mode, publish_mode,
         target_duration_seconds, created_by
       )
@@ -109,10 +120,10 @@ async function main() {
         ${seriesId}, 1, 'demo-episode-01',
         ${`${PLACEHOLDER} Demo Episode 1`},
         ${`${PLACEHOLDER} Synopsis. This episode exists to demonstrate the review workflow end to end.`},
-        'es',
+        'es', 'long_form',
         ${`${PLACEHOLDER} Period label`},
         'upload', 'upload', 'manual', 'manual_upload',
-        900, ${ownerId}
+        300, ${ownerId}
       )
       returning id
     `;
@@ -216,18 +227,89 @@ async function main() {
       )
     `;
 
+    // The English version of the same episode. It is a separate row with its own
+    // approval; the scene skeleton and sources are copied, the script is not.
+    const [translation] = await sql<{ id: string }[]>`
+      insert into episodes (
+        series_id, episode_number, slug, title, synopsis, language, primary_format,
+        translation_of_id, period_label, narration_mode, caption_mode,
+        scene_plan_mode, publish_mode, target_duration_seconds, created_by
+      )
+      values (
+        ${seriesId}, 1, 'demo-episode-01-en',
+        ${`${PLACEHOLDER} Demo Episode 1`},
+        ${`${PLACEHOLDER} Synopsis, English version.`},
+        'en', 'long_form', ${episodeId},
+        ${`${PLACEHOLDER} Period label`},
+        'upload', 'upload', 'manual', 'manual_upload',
+        300, ${ownerId}
+      )
+      returning id
+    `;
+    const translationId = translation!.id;
+
+    await sql`
+      insert into research_sources (
+        episode_id, citation, source_type, author, publisher, publication_year,
+        url, archive_reference, supports_claim, page_reference, verification,
+        verified_by, verified_at, notes
+      )
+      select ${translationId}, citation, source_type, author, publisher, publication_year,
+             url, archive_reference, supports_claim, page_reference, verification,
+             verified_by, verified_at, notes
+      from research_sources where episode_id = ${episodeId}
+    `;
+
+    await sql`
+      insert into scenes (
+        episode_id, position, heading, on_screen_text, visual_direction,
+        template, estimated_seconds, is_ai_suggested, human_reviewed, notes
+      )
+      select ${translationId}, position, heading, on_screen_text, visual_direction,
+             template, estimated_seconds, false, true, notes
+      from scenes where episode_id = ${episodeId}
+    `;
+
+    // A standalone social bite, to show the 50–90 second target window in use.
+    const [short] = await sql<{ id: string }[]>`
+      insert into episodes (
+        series_id, episode_number, slug, title, synopsis, language, primary_format,
+        period_label, narration_mode, caption_mode, scene_plan_mode, publish_mode,
+        target_duration_seconds, created_by
+      )
+      values (
+        ${seriesId}, 1, 'demo-short-01',
+        ${`${PLACEHOLDER} Demo Social Bite 1`},
+        ${`${PLACEHOLDER} A 50–90 second vertical cut.`},
+        'es', 'short_form',
+        ${`${PLACEHOLDER} Period label`},
+        'upload', 'upload', 'manual', 'manual_upload',
+        70, ${ownerId}
+      )
+      returning id
+    `;
+
+    await sql`
+      insert into scenes (episode_id, position, heading, narration_text, template, estimated_seconds, human_reviewed)
+      values
+        (${short!.id}, 1, ${`${PLACEHOLDER} Hook`}, ${`${PLACEHOLDER} Narration.`}, 'title_card', 5, true),
+        (${short!.id}, 2, ${`${PLACEHOLDER} The point`}, ${`${PLACEHOLDER} Narration.`}, 'archival_still', 55, true),
+        (${short!.id}, 3, ${`${PLACEHOLDER} Close`}, ${`${PLACEHOLDER} Narration.`}, 'outro_card', 8, true)
+    `;
+
     await sql`
       insert into audit_log (actor_id, actor_email, action, entity_type, entity_id, episode_id, summary)
       values (
         ${ownerId}, ${ownerEmail}, 'seed.create', 'episode', ${episodeId}, ${episodeId},
-        'Seeded the demo episode with placeholder content'
+        'Seeded the demo episodes with placeholder content'
       )
     `;
 
     console.log("Seed complete.");
     console.log(`  Owner:  ${ownerEmail} / ${ownerPassword}   (can approve)`);
     console.log("  Editor: editor@historia.local / historia-dev   (cannot approve)");
-    console.log("  One demo episode with a placeholder script, 7 scenes and 2 sources.");
+    console.log("  Series: Historia of Dominicana — long form 4–6 min, shorts 50–90 s");
+    console.log("  Episodes: Spanish demo (313 s planned) + its English version + one social bite.");
   } finally {
     await sql.end();
   }

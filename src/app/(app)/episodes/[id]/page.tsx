@@ -18,6 +18,7 @@ import {
   listSceneSourceLinks,
   listScenes,
   listSources,
+  listTranslations,
   listVersions,
   listVoiceovers,
 } from "@/server/episodes";
@@ -28,6 +29,7 @@ import { ProductionTab } from "./production-tab";
 import { ScenesTab } from "./scenes-tab";
 import { ScriptTab } from "./script-tab";
 import { SourcesTab } from "./sources-tab";
+import { TranslationPanel } from "./translation-panel";
 import { WorkflowPanel } from "./workflow-panel";
 
 export const dynamic = "force-dynamic";
@@ -74,6 +76,7 @@ export default async function EpisodePage({
     voiceoverRows,
     captionRows,
     renderRows,
+    translations,
     history,
   ] = await Promise.all([
     getSessionUser(),
@@ -89,6 +92,7 @@ export default async function EpisodePage({
     listVoiceovers(id),
     listCaptions(id),
     listRenders(id),
+    listTranslations(id),
     db.select().from(auditLog).where(eq(auditLog.episodeId, id)).orderBy(desc(auditLog.createdAt)).limit(50),
   ]);
 
@@ -339,7 +343,7 @@ export default async function EpisodePage({
           ) : null}
         </div>
 
-        <aside className="min-w-0">
+        <aside className="min-w-0 space-y-4">
           <WorkflowPanel
             episodeId={id}
             status={episode.status}
@@ -347,6 +351,19 @@ export default async function EpisodePage({
             canApprove={user ? user.role === "owner" || user.role === "reviewer" : false}
             approvedVersionNumber={approvedVersion?.versionNumber ?? null}
             approvedAt={episode.approvedAt ? episode.approvedAt.toISOString() : null}
+          />
+
+          <TranslationPanel
+            episodeId={id}
+            language={episode.language}
+            isTranslation={Boolean(episode.translationOfId)}
+            siblings={translations.map((t) => ({
+              id: t.id,
+              title: t.title,
+              language: t.language,
+              status: t.status,
+              isOriginal: Boolean(t.is_original),
+            }))}
           />
         </aside>
       </div>

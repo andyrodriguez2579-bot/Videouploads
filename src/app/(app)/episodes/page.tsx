@@ -122,7 +122,11 @@ export default async function EpisodesPage({
                     <Link href={`/episodes/${episode.id}`} className="link font-medium">
                       {episode.title}
                     </Link>
-                    <p className="text-xs text-black/50">{seriesTitle}</p>
+                    <p className="text-xs text-black/50">
+                      {seriesTitle} · {episode.language === "en" ? "English" : "Spanish"}
+                      {episode.translationOfId ? " (translation)" : ""} ·{" "}
+                      {episode.primaryFormat === "short_form" ? "short form" : "long form"}
+                    </p>
                   </td>
                   <td className="px-4 py-3 text-black/70">{episode.periodLabel ?? "—"}</td>
                   <td className="px-4 py-3">
