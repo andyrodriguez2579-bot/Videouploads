@@ -29,6 +29,16 @@ const CARD_COLOUR = "0x14181d";
 const AUDIO_SAMPLE_RATE = 48000;
 
 /**
+ * EBU R128 target. YouTube normalises uploads to roughly -14 LUFS, so
+ * delivering at -14 means the platform leaves the mix alone instead of pulling
+ * it down and flattening the dynamics someone chose. -1.5 dBTP of headroom
+ * keeps lossy transcodes from clipping on the peaks.
+ */
+const LOUDNESS_TARGET_LUFS = -14;
+const LOUDNESS_TRUE_PEAK_DB = -1.5;
+const LOUDNESS_RANGE = 11;
+
+/**
  * Fonts are probed rather than configured: drawtext needs a real file, and a
  * missing one fails the render at the last step. Serif first — it matches the
  * documentary styling the app uses for headings.
@@ -201,7 +211,24 @@ export class FfmpegRenderProvider implements RenderProvider {
       });
 
       await mkdir(path.dirname(outputPath), { recursive: true });
-      await this.concat(segmentPaths, outputPath, workDir, signal);
+
+      // With narration the concat is an intermediate: the mix and the loudness
+      // pass happen once over the whole programme, which is the only level at
+      // which integrated loudness means anything.
+      const narrationPath = request.narrationPath ?? null;
+      const silentPath = narrationPath ? path.join(workDir, "silent.mp4") : outputPath;
+      await this.concat(segmentPaths, silentPath, workDir, signal);
+
+      let loudnessLufs: number | null = null;
+      if (narrationPath) {
+        await onProgress?.({
+          completed: plan.segments.length,
+          total: plan.segments.length + 1,
+          stage: "Mixing narration",
+        });
+        await this.mixNarration(silentPath, narrationPath, outputPath, signal);
+        loudnessLufs = await this.measureLoudness(outputPath, signal);
+      }
 
       const [{ size }, durationSeconds] = await Promise.all([
         stat(outputPath),
@@ -221,6 +248,7 @@ export class FfmpegRenderProvider implements RenderProvider {
         width: plan.width,
         height: plan.height,
         mimeType: "video/mp4",
+        loudnessLufs,
         log: logs.join("\n").slice(-4000),
       };
     } finally {
@@ -391,6 +419,85 @@ export class FfmpegRenderProvider implements RenderProvider {
       signal,
       "Joining scenes",
     );
+  }
+
+  /**
+   * Lays the narration under the finished picture and normalises the programme
+   * to the EBU R128 target.
+   *
+   * The video is stream-copied — it was encoded once already and re-encoding it
+   * to attach audio would cost quality for nothing. `-shortest` is deliberately
+   * absent: the plan has already been stretched so the picture covers the
+   * narration, and using it here would silently clip the last words instead.
+   */
+  private async mixNarration(
+    videoPath: string,
+    narrationPath: string,
+    outputPath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    await run(
+      this.ffmpeg,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        videoPath,
+        "-i",
+        narrationPath,
+        // Take picture from the first input and sound from the second, dropping
+        // the silent track the segments carry.
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-af",
+        `loudnorm=I=${LOUDNESS_TARGET_LUFS}:TP=${LOUDNESS_TRUE_PEAK_DB}:LRA=${LOUDNESS_RANGE}`,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        String(AUDIO_SAMPLE_RATE),
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ],
+      signal,
+      "Mixing narration",
+    );
+  }
+
+  /**
+   * Integrated loudness of the finished file, for the record rather than for
+   * control — `loudnorm` has already done the correcting. Stored so an operator
+   * can see what was actually delivered.
+   */
+  private async measureLoudness(
+    filePath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<number | null> {
+    try {
+      const { stderr } = await run(
+        this.ffmpeg,
+        ["-hide_banner", "-nostats", "-i", filePath, "-af", "ebur128", "-f", "null", "-"],
+        signal,
+        "Measuring loudness",
+      );
+      // ebur128 prints a summary block ending with "I: -14.0 LUFS".
+      const matches = [...stderr.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/g)];
+      const last = matches.at(-1)?.[1];
+      return last === undefined ? null : Math.round(Number.parseFloat(last) * 100) / 100;
+    } catch {
+      // A measurement is a nicety; never fail a good render over one.
+      return null;
+    }
   }
 
   private async probeDuration(filePath: string, signal: AbortSignal | undefined): Promise<number> {

@@ -143,6 +143,78 @@ describe("buildRenderPlan", () => {
   });
 });
 
+describe("fitting the plan to narration", () => {
+  const scenes = [
+    scene({ id: "a", position: 1, estimatedSeconds: 4 }),
+    scene({ id: "b", position: 2, estimatedSeconds: 6 }),
+  ];
+
+  it("holds the last scene when the narration outlasts the scene plan", () => {
+    const plan = buildRenderPlan(scenes, { aspectRatio: "16:9", narrationSeconds: 15 });
+
+    expect(plan.totalSeconds).toBe(15);
+    // Only the final scene stretches; earlier cuts keep their timing.
+    expect(plan.segments.map((s) => s.durationSeconds)).toEqual([4, 11]);
+    expect(plan.segments.map((s) => s.startSeconds)).toEqual([0, 4]);
+  });
+
+  it("marks a stretched final scene as estimated", () => {
+    const plan = buildRenderPlan(scenes, { aspectRatio: "16:9", narrationSeconds: 15 });
+    expect(plan.segments.at(-1)!.durationIsEstimated).toBe(true);
+  });
+
+  it("leaves the plan alone when the narration is shorter", () => {
+    const plan = buildRenderPlan(scenes, { aspectRatio: "16:9", narrationSeconds: 6 });
+    expect(plan.totalSeconds).toBe(10);
+    expect(plan.segments.map((s) => s.durationSeconds)).toEqual([4, 6]);
+  });
+
+  it("records the narration length it was fitted to", () => {
+    expect(buildRenderPlan(scenes, { aspectRatio: "16:9", narrationSeconds: 20 }).narrationSeconds)
+      .toBe(20);
+    expect(buildRenderPlan(scenes, { aspectRatio: "16:9" }).narrationSeconds).toBeNull();
+  });
+
+  it("ignores an unreadable narration duration rather than producing NaN", () => {
+    const plan = buildRenderPlan(scenes, {
+      aspectRatio: "16:9",
+      narrationSeconds: Number.NaN,
+    });
+    expect(plan.totalSeconds).toBe(10);
+  });
+
+  it("warns when narration runs well past the scene plan", () => {
+    const plan = buildRenderPlan(scenes, { aspectRatio: "16:9", narrationSeconds: 40 });
+    const decision = assessRender(
+      { sceneCount: 2, scenesWithoutDuration: 0, targetWindow: null, plannedSceneSeconds: 10 },
+      plan,
+    );
+
+    expect(decision.canRender).toBe(true);
+    expect(decision.warnings.join(" ")).toMatch(/longer than the scene plan/i);
+  });
+
+  it("warns when the film would end in silence", () => {
+    const plan = buildRenderPlan(scenes, { aspectRatio: "16:9", narrationSeconds: 2 });
+    const decision = assessRender(
+      { sceneCount: 2, scenesWithoutDuration: 0, targetWindow: null, plannedSceneSeconds: 10 },
+      plan,
+    );
+
+    expect(decision.warnings.join(" ")).toMatch(/ends in silence/i);
+  });
+
+  it("stays silent when narration and scene plan are close enough", () => {
+    const plan = buildRenderPlan(scenes, { aspectRatio: "16:9", narrationSeconds: 12 });
+    const decision = assessRender(
+      { sceneCount: 2, scenesWithoutDuration: 0, targetWindow: null, plannedSceneSeconds: 10 },
+      plan,
+    );
+
+    expect(decision.warnings).toEqual([]);
+  });
+});
+
 describe("assessRender", () => {
   // 5:00 total, built from scenes short enough not to hit the per-scene clamp.
   const plan = buildRenderPlan(

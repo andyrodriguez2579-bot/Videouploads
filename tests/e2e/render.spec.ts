@@ -10,6 +10,9 @@ import { expect, test, type Page } from "@playwright/test";
 
 const OWNER = { email: "owner@historia.local", password: "historia-dev" };
 
+/** 12 seconds of audio, regenerate with scripts/make-fixtures.sh. */
+const NARRATION_FIXTURE = "tests/fixtures/narration.mp3";
+
 async function signIn(page: Page, user: { email: string; password: string }) {
   await page.goto("/login");
   await page.getByLabel("Email").fill(user.email);
@@ -37,7 +40,15 @@ async function createRenderableEpisode(page: Page, title: string): Promise<strin
   return episodeUrl;
 }
 
-const renderPanel = (page: Page) => page.locator("section").filter({ hasText: "Render" }).first();
+/**
+ * Panels are located by their heading, not by prose. Both panels legitimately
+ * use the word "render" in their body copy, so a hasText filter matches
+ * whichever comes first in the DOM.
+ */
+const panel = (page: Page, heading: string) =>
+  page.locator("section").filter({ has: page.getByRole("heading", { name: heading, exact: true }) });
+
+const renderPanel = (page: Page) => panel(page, "Render");
 
 test.describe("render pipeline", () => {
   test("an episode with no scenes cannot be rendered", async ({ page }) => {
@@ -93,5 +104,33 @@ test.describe("render pipeline", () => {
     // The seeded database has no renders, so this asserts the page switched off
     // its Milestone 2 placeholder once real rows existed.
     await expect(page.getByRole("heading", { name: "Render center" })).toBeVisible();
+  });
+});
+
+test.describe("narration", () => {
+  test("mixes uploaded narration and holds the picture to cover it", async ({ page }) => {
+    test.setTimeout(180_000);
+    await signIn(page, OWNER);
+
+    // One 2s scene against 12s of narration: the picture must stretch to 12s
+    // rather than the narration being cut off at 2s.
+    const episodeUrl = await createRenderableEpisode(page, `Render — narration ${Date.now()}`);
+    await page.goto(`${episodeUrl}?tab=production`);
+
+    await panel(page, "Narration").getByLabel("Audio file").setInputFiles(NARRATION_FIXTURE);
+    await page.getByRole("button", { name: "Upload narration" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Narration uploaded" })).toBeVisible();
+
+    // The plan is refitted to the narration as soon as it is known.
+    await expect(renderPanel(page)).toContainText("0:12");
+
+    await page.getByRole("button", { name: "Start render" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Render started" })).toBeVisible();
+
+    const watchLink = page.getByRole("link", { name: "Watch" });
+    await expect(watchLink).toBeVisible({ timeout: 150_000 });
+
+    // The finished file must actually be ~12s, not the 2s the scene planned.
+    await expect(renderPanel(page)).toContainText("0:12");
   });
 });

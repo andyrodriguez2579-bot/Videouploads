@@ -199,6 +199,7 @@ npm run test             # vitest — workflow and render-planning rules
 npm run test:e2e         # playwright — approval, uploads, rendering
 npm run render:sample    # render a demo MP4 with no database involved
 npm run worker           # render worker (only when REDIS_URL is set)
+./scripts/make-fixtures.sh   # regenerate binary test fixtures
 ```
 
 `render:sample` is the quickest way to check the local FFmpeg toolchain:
@@ -229,7 +230,8 @@ and seeded database:
 - [`asset-upload.spec.ts`](tests/e2e/asset-upload.spec.ts) — upload, storage,
   read-back through the guarded file route, and its two refusals.
 - [`render.spec.ts`](tests/e2e/render.spec.ts) — renders an episode to an actual
-  MP4 and checks the served bytes really are one. Needs FFmpeg.
+  MP4 and checks the served bytes really are one; uploads narration and checks
+  the picture is held to cover it. Needs FFmpeg.
 
 ```bash
 npm run test:e2e:install   # once
@@ -483,11 +485,46 @@ Two things this slice found:
   `ioredis` are now server-external — that noise is where a real module error
   goes to hide.
 
+### 2026-07-28 — Milestone 2, third slice: narration
+
+Upload a recording on the Production tab and the next render lays it under the
+picture, normalised in one pass over the whole programme.
+
+**Decision: −14 LUFS, not −16 or −23.** YouTube normalises uploads to roughly
+−14 LUFS. Delivering at that target means the platform leaves the mix alone
+instead of pulling it down and flattening whatever dynamics were chosen. True
+peak is capped at −1.5 dBTP so lossy transcodes do not clip.
+
+**Decision: the picture stretches, the narration never gets cut.** If a
+recording outlasts the scene plan the final scene is held until it finishes. A
+picture that lingers is a stylistic wrinkle; a word clipped off mid-sentence is
+a defect. `-shortest` is deliberately absent from the mix command for the same
+reason. The plan warns in both directions — narration running well past the
+scene plan, or a plan long enough that the film ends in silence.
+
+Loudness is normalised once over the finished programme rather than per segment,
+because integrated loudness only means anything at programme level. The measured
+result is stored on both the render and the voiceover, so the delivered figure is
+visible without re-probing the file.
+
+Duration is read with `ffprobe` at *upload* time, not render time: the scene plan
+is fitted to it, and an editor needs that number while they are still editing.
+
+Verified end to end: a 2-second scene plan with 12 seconds of narration produced
+a 12.05s film with an AAC stereo track measuring exactly −14.0 LUFS, from a
+source deliberately 24 dB down.
+
+One thing this slice re-taught: the narration panel's own copy contains the word
+"render", which broke the e2e selector that located the render panel by prose.
+Panels are now located by heading. That is the same ambiguity that bit
+`getByText("Draft")` two slices ago — body copy is not an identifier.
+
 ### Next — the rest of Milestone 2
 
-- **Narration audio**, mixed and loudness-normalised in the same job. Segments
-  already carry a silent stereo track so the mix has somewhere to go.
 - **Subtitles** — SRT/VTT import, then faster-whisper timing locally.
+- **Per-scene narration.** The `voiceovers.scene_id` column already exists; only
+  full-episode narration is mixed today, because mixing both would overlap.
+- **Local narration generation** with Piper, as an alternative to uploading.
 - **Richer templates** — Ken Burns motion on stills, and per-template layouts
   rather than one shared lower-third.
 

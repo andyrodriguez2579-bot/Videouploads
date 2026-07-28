@@ -289,6 +289,7 @@ export default async function EpisodePage({
                 provider: v.provider,
                 objectKey: v.objectKey,
                 durationSeconds: v.durationSeconds,
+                loudnessLufs: v.loudnessLufs,
                 status: v.status,
                 isSelected: v.isSelected,
               }))}
@@ -300,7 +301,6 @@ export default async function EpisodePage({
                 status: c.status,
                 humanReviewed: c.humanReviewed,
               }))}
-              renderCount={renderRows.length}
               renders={renderRows.map(({ render, progress, stage, jobError }) => ({
                 id: render.id,
                 kind: render.kind,

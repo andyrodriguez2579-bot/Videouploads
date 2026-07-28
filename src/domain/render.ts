@@ -79,6 +79,8 @@ export interface RenderPlan {
   fps: number;
   segments: RenderSegment[];
   totalSeconds: number;
+  /** Length of the narration this plan was fitted to, when one is selected. */
+  narrationSeconds: number | null;
 }
 
 /**
@@ -118,7 +120,7 @@ function captionFor(scene: PlannedScene): string | null {
  */
 export function buildRenderPlan(
   scenes: PlannedScene[],
-  options: { aspectRatio: AspectRatio; fps?: number },
+  options: { aspectRatio: AspectRatio; fps?: number; narrationSeconds?: number | null },
 ): RenderPlan {
   const { width, height } = ASPECT_DIMENSIONS[options.aspectRatio];
   const ordered = [...scenes].sort((a, b) => a.position - b.position);
@@ -141,6 +143,18 @@ export function buildRenderPlan(
     return segment;
   });
 
+  // Narration must never be cut off mid-sentence. If the recording outlasts the
+  // scene plan, hold the last scene until it finishes rather than truncating —
+  // a picture that lingers is a stylistic wrinkle, a clipped word is a defect.
+  const narration = options.narrationSeconds ?? null;
+  const lastSegment = segments.at(-1);
+  if (narration !== null && Number.isFinite(narration) && narration > cursor && lastSegment) {
+    const shortfall = narration - cursor;
+    lastSegment.durationSeconds = round3(lastSegment.durationSeconds + shortfall);
+    lastSegment.durationIsEstimated = true;
+    cursor = narration;
+  }
+
   return {
     aspectRatio: options.aspectRatio,
     width,
@@ -148,6 +162,7 @@ export function buildRenderPlan(
     fps: options.fps ?? DEFAULT_FPS,
     segments,
     totalSeconds: round3(cursor),
+    narrationSeconds: narration,
   };
 }
 
@@ -157,7 +172,15 @@ export interface RenderReadiness {
   scenesWithoutDuration: number;
   /** Target window for this episode's format, when the series defines one. */
   targetWindow: { minSeconds: number; maxSeconds: number } | null;
+  /** Total of the scene estimates before any narration fitting was applied. */
+  plannedSceneSeconds?: number;
 }
+
+/**
+ * How far the scene plan may sit under the narration before it is worth saying
+ * so. Below this, holding the last frame is unnoticeable.
+ */
+export const NARRATION_DRIFT_WARN_SECONDS = 5;
 
 export interface RenderDecision {
   canRender: boolean;
@@ -187,6 +210,22 @@ export function assessRender(readiness: RenderReadiness, plan: RenderPlan): Rend
       `${readiness.scenesWithoutDuration} scene(s) have no planned duration and will run ` +
         `for the ${DEFAULT_SCENE_SECONDS}s default.`,
     );
+  }
+
+  const narration = plan.narrationSeconds;
+  if (narration !== null && readiness.plannedSceneSeconds !== undefined) {
+    const drift = narration - readiness.plannedSceneSeconds;
+    if (drift > NARRATION_DRIFT_WARN_SECONDS) {
+      warnings.push(
+        `Narration runs ${formatSeconds(drift)} longer than the scene plan; the last ` +
+          `scene is held to cover it. Add or lengthen scenes to control what is on screen.`,
+      );
+    } else if (-drift > NARRATION_DRIFT_WARN_SECONDS) {
+      warnings.push(
+        `The scene plan runs ${formatSeconds(-drift)} longer than the narration; the ` +
+          `film ends in silence.`,
+      );
+    }
   }
 
   const target = readiness.targetWindow;

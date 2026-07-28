@@ -5,7 +5,7 @@ import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { and, asc, eq, inArray, lt } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt } from "drizzle-orm";
 
 import { db } from "@/db/client";
 import {
@@ -17,6 +17,7 @@ import {
   sceneAssets,
   scenes,
   series,
+  voiceovers,
 } from "@/db/schema";
 import {
   assessRender,
@@ -59,13 +60,18 @@ export async function previewRender(
   episodeId: string,
   aspectRatio: AspectRatio,
 ): Promise<RenderPreview> {
-  const { plannedScenes, targetWindow } = await loadPlanInputs(episodeId, aspectRatio);
-  const plan = buildRenderPlan(plannedScenes, { aspectRatio });
+  const { plannedScenes, targetWindow, narration } = await loadPlanInputs(episodeId, aspectRatio);
+  const scenePlan = buildRenderPlan(plannedScenes, { aspectRatio });
+  const plan = buildRenderPlan(plannedScenes, {
+    aspectRatio,
+    narrationSeconds: narration?.seconds ?? null,
+  });
   const decision = assessRender(
     {
       sceneCount: plannedScenes.length,
       scenesWithoutDuration: plannedScenes.filter((s) => s.estimatedSeconds === null).length,
       targetWindow,
+      plannedSceneSeconds: scenePlan.totalSeconds,
     },
     plan,
   );
@@ -142,7 +148,28 @@ export async function startRender(input: {
   // With Redis configured the work is handed to a worker that survives a
   // restart. Without it, run in-process: the job row is still the record of
   // progress, but an interrupted render is orphaned until reclaimed.
-  const queuedJobId = await enqueueRender(render.id);
+  let queuedJobId: string | null;
+  try {
+    queuedJobId = await enqueueRender(render.id);
+  } catch (error) {
+    // Redis is configured but unreachable. Fail the render now rather than
+    // leaving it at `queued` forever: nothing will ever pick it up, and the
+    // stale reclaimer deliberately only touches jobs that reached `running`.
+    const message = `Could not queue the render: ${
+      error instanceof Error ? error.message : "the job queue is unreachable"
+    }`;
+    const now = new Date();
+    await db
+      .update(renders)
+      .set({ status: "failed", errorMessage: message, updatedAt: now })
+      .where(eq(renders.id, render.id));
+    await db
+      .update(renderJobs)
+      .set({ status: "failed", stage: "Not queued", errorMessage: message, finishedAt: now, updatedAt: now })
+      .where(eq(renderJobs.id, job.id));
+    throw new Error(message);
+  }
+
   if (queuedJobId) {
     await db
       .update(renderJobs)
@@ -196,8 +223,11 @@ export async function runRenderJob(renderId: string): Promise<void> {
   const workDir = await mkdtemp(path.join(tmpdir(), "historia-job-"));
 
   try {
-    const { plannedScenes } = await loadPlanInputs(render.episodeId, aspectRatio);
-    const plan = buildRenderPlan(plannedScenes, { aspectRatio });
+    const { plannedScenes, narration } = await loadPlanInputs(render.episodeId, aspectRatio);
+    const plan = buildRenderPlan(plannedScenes, {
+      aspectRatio,
+      narrationSeconds: narration?.seconds ?? null,
+    });
     if (plan.segments.length === 0) throw new Error("The episode has no scenes to render.");
 
     const storage = getStorage();
@@ -207,6 +237,7 @@ export async function runRenderJob(renderId: string): Promise<void> {
       plan,
       outputPath,
       resolveAsset: (key) => stageAsset(storage, key, workDir),
+      narrationPath: narration ? await stageAsset(storage, narration.objectKey, workDir) : null,
       onProgress: async (progress) => {
         if (!job) return;
         const percent = Math.min(
@@ -246,9 +277,23 @@ export async function runRenderJob(renderId: string): Promise<void> {
         width: result.width,
         height: result.height,
         errorMessage: null,
+        details: {
+          ...(render.details as Record<string, unknown>),
+          narrationMixed: Boolean(narration),
+          loudnessLufs: result.loudnessLufs,
+        },
         updatedAt: finished,
       })
       .where(eq(renders.id, renderId));
+
+    // Record what the narration actually measured once normalised, so an
+    // operator can see the delivered loudness without re-probing the file.
+    if (narration && result.loudnessLufs !== null) {
+      await db
+        .update(voiceovers)
+        .set({ loudnessLufs: String(result.loudnessLufs), updatedAt: finished })
+        .where(eq(voiceovers.id, narration.id));
+    }
 
     if (job) {
       await db
@@ -375,6 +420,7 @@ async function loadPlanInputs(
 ): Promise<{
   plannedScenes: PlannedScene[];
   targetWindow: { minSeconds: number; maxSeconds: number } | null;
+  narration: { objectKey: string; seconds: number | null; id: string } | null;
 }> {
   const sceneRows = await db
     .select()
@@ -395,9 +441,37 @@ async function loadPlanInputs(
     backgroundKey: backgrounds.get(scene.id) ?? null,
   }));
 
+  const [narrationRow] = await db
+    .select({
+      id: voiceovers.id,
+      objectKey: voiceovers.objectKey,
+      durationSeconds: voiceovers.durationSeconds,
+    })
+    .from(voiceovers)
+    .where(
+      and(
+        eq(voiceovers.episodeId, episodeId),
+        eq(voiceovers.isSelected, true),
+        eq(voiceovers.status, "ready"),
+        // Full-episode narration only. Per-scene narration is a later slice;
+        // mixing the two would produce overlapping audio.
+        isNull(voiceovers.sceneId),
+      ),
+    )
+    .limit(1);
+
   return {
     plannedScenes,
     targetWindow: await loadTargetWindow(episodeId, aspectRatio),
+    narration:
+      narrationRow?.objectKey
+        ? {
+            id: narrationRow.id,
+            objectKey: narrationRow.objectKey,
+            seconds:
+              narrationRow.durationSeconds === null ? null : Number(narrationRow.durationSeconds),
+          }
+        : null,
   };
 }
 
