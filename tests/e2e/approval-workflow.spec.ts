@@ -12,6 +12,15 @@ import { expect, test, type Page } from "@playwright/test";
 const OWNER = { email: "owner@historia.local", password: "historia-dev" };
 const EDITOR = { email: "editor@historia.local", password: "historia-dev" };
 
+/**
+ * Next injects an always-empty `role="alert"` route announcer at body level, so
+ * a bare getByRole("alert") is ambiguous. Every alert we assert on is rendered
+ * inside the page's <main>, which the announcer sits outside of.
+ */
+function blocker(page: Page) {
+  return page.getByRole("main").getByRole("alert");
+}
+
 async function signIn(page: Page, user: { email: string; password: string }) {
   await page.goto("/login");
   await page.getByLabel("Email").fill(user.email);
@@ -45,8 +54,8 @@ test.describe("episode approval workflow", () => {
 
     await page.getByRole("button", { name: "Submit for review" }).click();
 
-    await expect(page.getByRole("alert")).toContainText("blocked");
-    await expect(page.getByRole("alert")).toContainText("script");
+    await expect(blocker(page)).toContainText("blocked");
+    await expect(blocker(page)).toContainText("script");
   });
 
   test("an episode moves draft → review → approved only when it is complete", async ({ page }) => {
@@ -74,7 +83,7 @@ test.describe("episode approval workflow", () => {
 
     // 4. Approval is refused: no source has been verified yet.
     await page.getByRole("button", { name: "Approve", exact: true }).click();
-    await expect(page.getByRole("alert")).toContainText("verified");
+    await expect(blocker(page)).toContainText("verified");
 
     // 5. Add a source and verify it.
     await page.goto(`${episodeUrl}?tab=sources`);
@@ -123,7 +132,7 @@ test.describe("episode approval workflow", () => {
     await expect(page.getByRole("status")).toContainText("approval was withdrawn");
 
     await page.goto(episodeUrl);
-    await expect(page.getByText("Draft")).toBeVisible();
+    await expect(page.getByText("Draft", { exact: true })).toBeVisible();
     await expect(page.getByText(/Approved: script version/)).toBeHidden();
   });
 

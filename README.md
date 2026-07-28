@@ -258,7 +258,7 @@ interactions work from the keyboard; nothing depends on hover or drag.
 Scaffolded the application by hand (Next.js 15 App Router, TypeScript, Tailwind,
 Drizzle, Zod) rather than via `create-next-app`, and implemented:
 
-- Full 17-table schema in `drizzle/0000_init.sql` with a custom SQL migration
+- Full 19-table schema in `drizzle/0000_init.sql` with a custom SQL migration
   runner that checksums applied files.
 - Local-first environment validation with paired-requirement checks (e.g.
   `STORAGE_DRIVER=s3` demands bucket and credentials).
@@ -319,6 +319,37 @@ archival still is the same file and the same licence obligation in both language
 The script is deliberately *not* copied, so an untranslated Spanish draft can
 never be mistaken for approved English copy. Translation graphs are kept one
 level deep so "the original" is never ambiguous.
+
+### 2026-07-28 — First full run of Milestone 1, and what it turned up
+
+Milestone 1 had never actually been run end to end against a live database. Doing
+so — migrate, seed, build, boot, drive the browser — found four things.
+
+- **`/assets` rendered two elements with `id="kind"`**, one in the filter bar and
+  one in the upload form. Duplicate ids are invalid HTML and the label binds to
+  whichever comes first, so clicking "Kind" above the upload form focused the
+  *filter*. Anyone using the keyboard or a screen reader would have set the filter
+  believing they were setting the asset kind, and uploaded with the default kind
+  silently. The filter's ids are now prefixed (`filter-kind`, and its siblings for
+  consistency); the `name` attributes are untouched because they drive the query
+  string.
+- **The Playwright suite could not pass.** `getByRole("alert")` also matched the
+  empty route announcer Next injects at body level, and `getByText("Draft")` had
+  become ambiguous once the translation panel added prose containing the word. The
+  app was right in every one of those cases — only the selectors were wrong.
+- **`npm ci` in the Dockerfile had no lockfile to install from**, so the image
+  still could not build even after the lazy-connection fix. `package-lock.json` is
+  now committed, which also makes builds reproducible.
+- **Two upload forms passed `encType` alongside a function `action`**, which React
+  overrides with a warning.
+
+Uploads now have their own e2e coverage (`tests/e2e/asset-upload.spec.ts`), which
+is what should have caught the id collision: it asserts the upload form's label
+resolves to the upload form's control, that every id on the page is unique, that a
+file reaches storage and reads back byte-for-byte through `/api/files/*`, and that
+the route refuses both an unknown key and a signed-out caller.
+
+Verified green: typecheck, lint, 20 unit tests, production build, 10 e2e tests.
 
 ### Next — Milestone 2: rendering pipeline
 

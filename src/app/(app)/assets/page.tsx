@@ -57,16 +57,33 @@ export default async function AssetsPage({
 
       <form method="get" role="search" className="card mb-6 grid gap-3 sm:grid-cols-4">
         <div className="sm:col-span-2">
-          <label className="label" htmlFor="q">
+          <label className="label" htmlFor="filter-q">
             Search
           </label>
-          <input id="q" name="q" type="search" defaultValue={params.q ?? ""} className="input" />
+          <input
+            id="filter-q"
+            name="q"
+            type="search"
+            defaultValue={params.q ?? ""}
+            className="input"
+          />
         </div>
         <div>
-          <label className="label" htmlFor="kind">
+          {/*
+            Ids here are prefixed because the upload form below uses the bare
+            field names as ids. Two elements sharing id="kind" is invalid HTML,
+            and the label binds to whichever comes first — which meant clicking
+            "Kind" in the upload form focused this filter instead.
+          */}
+          <label className="label" htmlFor="filter-kind">
             Kind
           </label>
-          <select id="kind" name="kind" defaultValue={params.kind ?? ""} className="input">
+          <select
+            id="filter-kind"
+            name="kind"
+            defaultValue={params.kind ?? ""}
+            className="input"
+          >
             <option value="">All kinds</option>
             {ASSET_KINDS.map((kind) => (
               <option key={kind} value={kind}>
@@ -77,11 +94,11 @@ export default async function AssetsPage({
         </div>
         <div className="flex items-end gap-2">
           <div className="flex-1">
-            <label className="label" htmlFor="clearance">
+            <label className="label" htmlFor="filter-clearance">
               Clearance
             </label>
             <select
-              id="clearance"
+              id="filter-clearance"
               name="clearance"
               defaultValue={params.clearance ?? ""}
               className="input"

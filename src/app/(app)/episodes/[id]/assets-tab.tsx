@@ -197,7 +197,8 @@ export function AssetsTab({
           </div>
         ) : null}
 
-        <form action={action} className="space-y-4" encType="multipart/form-data" noValidate>
+        {/* No encType: React sets it itself for a function action and warns if we do. */}
+        <form action={action} className="space-y-4" noValidate>
           <input type="hidden" name="episodeId" value={episodeId} />
 
           <Field label="Title" name="title" error={state.fields?.title}>

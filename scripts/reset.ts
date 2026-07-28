@@ -19,7 +19,14 @@ async function main() {
     process.exit(1);
   }
 
-  const sql = postgres(url, { max: 1 });
+  // `drop schema … cascade` raises a NOTICE listing every dropped object, which
+  // the driver would otherwise dump as a raw object and read like a failure.
+  const sql = postgres(url, {
+    max: 1,
+    onnotice: (notice) => {
+      if (notice.message) console.log(`  ${notice.message}`);
+    },
+  });
   try {
     console.log("Dropping schema public…");
     await sql.unsafe("drop schema public cascade; create schema public;");
