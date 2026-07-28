@@ -1,0 +1,2 @@
+# Local storage root (STORAGE_DRIVER=local). Uploaded files live here and are
+# git-ignored. Keep this file so the directory exists on a fresh clone.

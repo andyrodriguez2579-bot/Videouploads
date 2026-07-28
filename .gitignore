@@ -15,9 +15,11 @@ next-env.d.ts
 .env.local
 .env.*.local
 
-# Local development storage (uploaded scripts, audio, stills, renders)
-storage/
-!storage/.gitkeep
+# Local development storage (uploaded scripts, audio, stills, renders).
+# Anchored with a leading slash: an unanchored "storage/" would also match
+# src/lib/storage/ and silently drop the storage driver from the repo.
+/storage/*
+!/storage/.gitkeep
 
 .DS_Store
 Thumbs.db
