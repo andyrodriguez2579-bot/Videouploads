@@ -11,7 +11,16 @@ const nextConfig = {
   serverExternalPackages: ["postgres", "@aws-sdk/client-s3", "bcryptjs", "bullmq", "ioredis"],
   experimental: {
     serverActions: {
-      // Narration and archival stills are uploaded through server actions.
+      // Narration and archival stills are uploaded through server actions, and
+      // a server action buffers the whole body in memory — so this is a real
+      // memory ceiling, not a formality.
+      //
+      // 128 MB comfortably covers lossless narration: ten minutes of mono
+      // 24-bit/48 kHz is ~86 MB as WAV, ~50 MB as FLAC.
+      //
+      // MAX_UPLOAD_MB must not exceed this. src/lib/env.ts enforces that,
+      // because the failure mode otherwise is an opaque error at the exact
+      // moment someone uploads the take they just spent an hour recording.
       bodySizeLimit: "128mb",
     },
   },

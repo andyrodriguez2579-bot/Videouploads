@@ -9,6 +9,13 @@
  */
 import { z } from "zod";
 
+/**
+ * Mirrors `experimental.serverActions.bodySizeLimit` in next.config.mjs. That
+ * file cannot be imported here (it is loaded by the bundler, not the app), so
+ * the number lives in both places and this one enforces the relationship.
+ */
+export const SERVER_ACTION_BODY_LIMIT_MB = 128;
+
 const booleanish = z
   .enum(["true", "false", "1", "0"])
   .transform((v) => v === "true" || v === "1");
@@ -43,7 +50,7 @@ const baseSchema = z.object({
   S3_FORCE_PATH_STYLE: booleanish.default("true"),
   S3_PUBLIC_BASE_URL: z.string().url().optional(),
 
-  MAX_UPLOAD_MB: z.coerce.number().int().positive().default(512),
+  MAX_UPLOAD_MB: z.coerce.number().int().positive().default(SERVER_ACTION_BODY_LIMIT_MB),
 
   // --- Provider selection (interfaces land in M2/M3; config is read now) -----
   SCENE_PLAN_PROVIDER: z.enum(["manual", "mock", "openai", "anthropic"]).default("manual"),
@@ -77,6 +84,21 @@ const baseSchema = z.object({
 
 const envSchema = baseSchema
   .superRefine((env, ctx) => {
+    // Uploads go through server actions, which buffer the whole body in memory
+    // and are capped in next.config.mjs. A MAX_UPLOAD_MB above that cap is a
+    // promise the app cannot keep: the request dies with an opaque error at the
+    // moment someone uploads a take they just spent an hour recording.
+    if (env.MAX_UPLOAD_MB > SERVER_ACTION_BODY_LIMIT_MB) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["MAX_UPLOAD_MB"],
+        message:
+          `MAX_UPLOAD_MB (${env.MAX_UPLOAD_MB}) exceeds the server-action body limit of ` +
+          `${SERVER_ACTION_BODY_LIMIT_MB} MB. Lower it, or raise bodySizeLimit in ` +
+          `next.config.mjs — and remember that limit is real memory per upload.`,
+      });
+    }
+
     if (env.STORAGE_DRIVER === "s3") {
       for (const key of ["S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"] as const) {
         if (!env[key]) {

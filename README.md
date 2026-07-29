@@ -212,7 +212,9 @@ npm run render:sample -- ./still.mp4 16:9 photo.jpg   # over a real still
 
 ## Testing
 
-**Unit** — [`src/domain/workflow.test.ts`](src/domain/workflow.test.ts) covers the
+**Unit** — [`src/lib/env.test.ts`](src/lib/env.test.ts) covers the paired
+configuration requirements, including the upload ceiling;
+[`src/domain/workflow.test.ts`](src/domain/workflow.test.ts) covers the
 state machine and every approval gate;
 [`src/domain/render.test.ts`](src/domain/render.test.ts) covers scene timing,
 caption selection, aspect-ratio dimensions and the render warnings.
@@ -545,6 +547,21 @@ with a readable message.
 
 Both were found by testing with real material rather than a fixture. Neither was
 reachable from the test suite as written.
+
+### 2026-07-28 — The upload ceiling was a promise the app could not keep
+
+`MAX_UPLOAD_MB` defaulted to 512, but server actions — which is how every upload
+arrives — were capped at 128 MB in `next.config.mjs`. Nothing reconciled the
+two, so a file between those numbers died with an opaque error, at precisely the
+worst moment: someone uploading the take they just spent an hour recording.
+
+128 MB stays as the real ceiling, because a server action buffers the whole body
+in memory. It is comfortably enough for lossless narration — ten minutes of mono
+24-bit/48 kHz is ~86 MB as WAV, ~50 MB as FLAC. `MAX_UPLOAD_MB` now defaults to
+match, and the environment schema refuses to start if it is raised above the
+body limit, naming both places that have to change together. The number is
+declared once in `src/lib/env.ts` and mirrored in `next.config.mjs`, which the
+bundler loads and the app cannot import.
 
 ### Next — the rest of Milestone 2
 
