@@ -212,7 +212,9 @@ npm run render:sample -- ./still.mp4 16:9 photo.jpg   # over a real still
 
 ## Testing
 
-**Unit** — [`src/domain/subtitles.test.ts`](src/domain/subtitles.test.ts) covers
+**Unit** — [`src/domain/asset-source.test.ts`](src/domain/asset-source.test.ts)
+covers archive metadata parsing against recorded API responses;
+[`src/domain/subtitles.test.ts`](src/domain/subtitles.test.ts) covers
 cue timing, line breaking and SRT/VTT round-tripping;
 [`src/lib/env.test.ts`](src/lib/env.test.ts) covers the paired
 configuration requirements, including the upload ceiling;
@@ -636,6 +638,42 @@ Three things only a rendered frame revealed:
   its narration for the lower third, which with subtitles burned in printed the
   line as a caption *and* as a subtitle. The caption is now suppressed when
   captions are being drawn.
+
+### 2026-07-29 — Importing archival images by URL
+
+Paste a Wikimedia Commons file page, a loc.gov item, or a direct image link, and
+the app downloads the largest rendition and files a licence record built from the
+archive's own metadata: creator, date, rights wording, holding institution,
+catalogue reference.
+
+The point is the licence record, not the download. Fetching an image is trivial;
+what makes forty images an episode sustainable is not retyping forty citations.
+
+**Decision: an import never clears a licence.** The archive told us what it
+believes about the item. It did not tell us the rights are cleared for this use,
+"no known restrictions" is a curator's assessment rather than a guarantee, and
+public-domain status varies by jurisdiction. Every import lands uncleared, with
+the archive's wording stored verbatim and a note saying rights are unverified —
+so the approval gate this whole app is built around still has to be satisfied by
+a person who looked.
+
+The licence type is *guessed* from the archive's wording only where it is
+unambiguous, and left `unknown` otherwise. A wrong guess is worse than none,
+because it looks like a decision was made.
+
+Two details worth recording:
+
+- **Downloads are size-checked twice**, against `Content-Length` and again while
+  streaming. A server can understate or omit the header, and archive masters run
+  to hundreds of megabytes — without the second check one URL could exhaust
+  memory.
+- **JP2 masters are skipped** even when they are the largest file. They are often
+  the highest resolution on offer, and neither ffmpeg nor a browser can read one.
+  An unusable file is worse than a smaller usable one.
+
+Verified against the live APIs: Boazio's 1588 map of Drake's siege of Santo
+Domingo came back at 7174×6588, 5 MB, credited to the Bibliothèque nationale de
+France, licence recorded and left uncleared.
 
 ### Next — the rest of Milestone 2
 

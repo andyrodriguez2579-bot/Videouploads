@@ -8,6 +8,7 @@ import { ASSET_KINDS, LICENSE_TYPES, LICENSE_TYPE_LABELS } from "@/domain/types"
 import type { ActionState } from "@/lib/action-state";
 
 import { createLicenseAction, uploadAssetAction } from "./actions";
+import { importAssetAction } from "./import-actions";
 
 function Submit({ idle, busy }: { idle: string; busy: string }) {
   const { pending } = useFormStatus();
@@ -15,6 +16,66 @@ function Submit({ idle, busy }: { idle: string; busy: string }) {
     <button type="submit" className="btn-primary" disabled={pending}>
       {pending ? busy : idle}
     </button>
+  );
+}
+
+export function ImportForm({
+  episodes,
+}: {
+  episodes: { id: string; title: string }[];
+}) {
+  const [state, action] = useActionState<ActionState, FormData>(importAssetAction, {});
+
+  return (
+    <section className="card">
+      <h2 className="mb-1 font-serif text-lg font-semibold">Import from an archive</h2>
+      <p className="mb-4 text-xs text-black/60">
+        Paste a Wikimedia Commons file page, a loc.gov item, or a direct image link. The image
+        is downloaded at the largest size offered, and a licence record is created from the
+        archive&rsquo;s own metadata — creator, date, rights wording, reference.
+      </p>
+
+      {state.error ? (
+        <div className="mb-4">
+          <Alert tone="error" title={state.error} />
+        </div>
+      ) : null}
+      {state.ok && state.message ? (
+        <div className="mb-4">
+          <Alert tone="success" title={state.message} />
+        </div>
+      ) : null}
+
+      <form action={action} className="space-y-4">
+        <Field
+          label="Archive URL"
+          name="url"
+          error={state.fields?.url}
+          hint="e.g. https://commons.wikimedia.org/wiki/File:Example.jpg"
+        >
+          <input id="url" name="url" type="url" required className="input" />
+        </Field>
+
+        <Field label="Episode" name="importEpisodeId" hint="Leave blank to keep it in the shared library.">
+          <select id="importEpisodeId" name="episodeId" className="input" defaultValue="">
+            <option value="">Shared library</option>
+            {episodes.map((episode) => (
+              <option key={episode.id} value={episode.id}>
+                {episode.title}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Submit idle="Import" busy="Fetching…" />
+      </form>
+
+      <p className="mt-3 text-xs text-black/60">
+        The licence is always created <strong>uncleared</strong>. An archive tells you what it
+        believes about an item; it does not clear the rights for your use, and public-domain
+        status varies by country. Approval stays blocked until you have checked and ticked it.
+      </p>
+    </section>
   );
 }
 
