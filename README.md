@@ -563,11 +563,38 @@ body limit, naming both places that have to change together. The number is
 declared once in `src/lib/env.ts` and mirrored in `next.config.mjs`, which the
 bundler loads and the app cannot import.
 
+### 2026-07-28 — Per-scene narration
+
+Narration can now be recorded scene by scene, so a fluffed line means
+re-recording that scene rather than the whole episode. Over a long series that
+is the difference between a pleasant session and a miserable one.
+
+**Each scene is timed to its own line**, with the planned estimate acting as a
+floor rather than a ceiling — a short line on a scene meant to breathe still
+gets the length someone deliberately planned for it. A 0.4s tail follows each
+line, because cutting on the last syllable reads as a mistake; short enough that
+forty scenes do not accumulate into dead air.
+
+**Per-scene wins over a whole-episode recording**, and says so. Mixing both
+would overlap, and silently picking one is how someone spends an afternoon
+wondering why a re-record changed nothing. Scenes left without narration are
+called out too, rather than quietly playing silent.
+
+Each segment now carries its own audio through the concat, so the loudness pass
+normalises what is already in the film rather than mixing a track over it. That
+path lands closer to target than the episode-level mix — a real run measured
+−13.9 LUFS against a −14 target.
+
+**A test passed while the render was wrong.** The first per-scene e2e asserted
+"0:14" against the whole Render panel, which also prints the *planned* runtime —
+so it matched the plan while the actual file was four seconds long and silent.
+Assertions now target the finished render's own row, which shows the duration
+ffprobe read back off the file, and check the payload is too large to be silence.
+A test that can pass without the feature working is worse than no test.
+
 ### Next — the rest of Milestone 2
 
 - **Subtitles** — SRT/VTT import, then faster-whisper timing locally.
-- **Per-scene narration.** The `voiceovers.scene_id` column already exists; only
-  full-episode narration is mixed today, because mixing both would overlap.
 - **Local narration generation** with Piper, as an alternative to uploading.
 - **Richer templates** — Ken Burns motion on stills, and per-template layouts
   rather than one shared lower-third.

@@ -50,6 +50,17 @@ const panel = (page: Page, heading: string) =>
 
 const renderPanel = (page: Page) => panel(page, "Render");
 
+/**
+ * The finished render's own row, which shows the duration ffprobe read back off
+ * the file. Asserting on the panel as a whole would also match the *planned*
+ * runtime printed above it — which is how a render that produced four silent
+ * seconds once passed a test expecting fourteen.
+ */
+const finishedRender = (page: Page) =>
+  renderPanel(page)
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("link", { name: "Watch" }) });
+
 test.describe("render pipeline", () => {
   test("an episode with no scenes cannot be rendered", async ({ page }) => {
     await signIn(page, OWNER);
@@ -131,6 +142,64 @@ test.describe("narration", () => {
     await expect(watchLink).toBeVisible({ timeout: 150_000 });
 
     // The finished file must actually be ~12s, not the 2s the scene planned.
-    await expect(renderPanel(page)).toContainText("0:12");
+    await expect(finishedRender(page)).toContainText("0:12");
+  });
+});
+
+test.describe("per-scene narration", () => {
+  test("times each scene to its own line and mixes them in order", async ({ page }) => {
+    test.setTimeout(180_000);
+    await signIn(page, OWNER);
+
+    // Two scenes planned at 2s each. Scene 1 gets a 12s line, so the finished
+    // film must be ~14.4s (12 + tail + 2), not the 4s the plan asked for.
+    await page.goto("/episodes/new");
+    await page.getByLabel("Title", { exact: true }).fill(`Render — per scene ${Date.now()}`);
+    await page.getByRole("button", { name: "Create episode" }).click();
+    await expect(page).toHaveURL(/\/episodes\/[0-9a-f-]{36}/);
+    const episodeUrl = page.url();
+
+    for (const heading of ["Primera escena", "Segunda escena"]) {
+      await page.goto(`${episodeUrl}?tab=scenes`);
+      await page.getByLabel("Heading", { exact: true }).fill(heading);
+      await page.getByLabel("Estimated seconds").fill("2");
+      await page.getByRole("button", { name: "Add scene" }).click();
+      await expect(page.getByRole("status").filter({ hasText: "Scene added" })).toBeVisible();
+    }
+
+    await page.goto(`${episodeUrl}?tab=production`);
+    const narration = panel(page, "Narration");
+
+    const sceneOne = narration.getByRole("listitem").filter({ hasText: "Primera escena" });
+    await sceneOne.getByLabel(/Narration for scene/).setInputFiles(NARRATION_FIXTURE);
+    await sceneOne.getByRole("button", { name: "Upload" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Narration uploaded" })).toBeVisible();
+
+    // The scene with a line is marked recorded; the other is still silent.
+    await expect(narration.getByRole("listitem").filter({ hasText: "Primera escena" })).toContainText(
+      "Recorded",
+    );
+    await expect(narration.getByRole("listitem").filter({ hasText: "Segunda escena" })).toContainText(
+      "Silent",
+    );
+
+    // The plan is refitted: 12s line + 0.4s tail + 2s second scene.
+    await expect(renderPanel(page)).toContainText("0:14");
+    await expect(renderPanel(page)).toContainText("no narration and will play silent");
+
+    await page.getByRole("button", { name: "Start render" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Render started" })).toBeVisible();
+
+    await expect(page.getByRole("link", { name: "Watch" })).toBeVisible({ timeout: 150_000 });
+
+    // The rendered file itself, not the plan: 12s line + 0.4s tail + 2s scene.
+    await expect(finishedRender(page)).toContainText("0:14");
+
+    // And it must not be silent — a per-scene mix that dropped the audio would
+    // still produce a correctly-timed film.
+    const href = await page.getByRole("link", { name: "Watch" }).getAttribute("href");
+    const body = await (await page.request.get(href!)).body();
+    // A 14s silent AAC track compresses to almost nothing; real speech does not.
+    expect(body.length).toBeGreaterThan(60_000);
   });
 });

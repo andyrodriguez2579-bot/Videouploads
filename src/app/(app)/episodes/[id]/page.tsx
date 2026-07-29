@@ -292,7 +292,32 @@ export default async function EpisodePage({
                 loudnessLufs: v.loudnessLufs,
                 status: v.status,
                 isSelected: v.isSelected,
+                sceneId: v.sceneId,
               }))}
+              sceneNarration={sceneRows.map(({ scene }) => {
+                const take = voiceoverRows.find(
+                  (v) => v.sceneId === scene.id && v.isSelected && v.status === "ready",
+                );
+                return {
+                  sceneId: scene.id,
+                  position: scene.position,
+                  heading: scene.heading,
+                  estimatedSeconds: scene.estimatedSeconds,
+                  voiceover: take
+                    ? {
+                        id: take.id,
+                        sceneId: take.sceneId,
+                        source: take.source,
+                        provider: take.provider,
+                        objectKey: take.objectKey,
+                        durationSeconds: take.durationSeconds,
+                        loudnessLufs: take.loudnessLufs,
+                        status: take.status,
+                        isSelected: take.isSelected,
+                      }
+                    : null,
+                };
+              })}
               captions={captionRows.map((c) => ({
                 id: c.id,
                 format: c.format,

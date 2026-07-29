@@ -41,6 +41,15 @@ export const DEFAULT_SCENE_SECONDS = 5;
 export const MIN_SCENE_SECONDS = 1;
 export const MAX_SCENE_SECONDS = 120;
 
+/**
+ * Breathing room left after a scene's own narration finishes.
+ *
+ * Cutting on the last syllable reads as a mistake. Four tenths of a second is
+ * long enough to feel deliberate and short enough not to drag across forty
+ * scenes, where it would otherwise add sixteen seconds of dead air.
+ */
+export const SCENE_NARRATION_TAIL_SECONDS = 0.4;
+
 export interface PlannedScene {
   id: string;
   position: number;
@@ -55,6 +64,10 @@ export interface PlannedScene {
    * legitimate look for title and quote cards.
    */
   backgroundKey: string | null;
+  /** Storage key of this scene's own narration, when recorded per scene. */
+  narrationKey?: string | null;
+  /** Length of that narration, so the scene can be timed to it. */
+  narrationSeconds?: number | null;
 }
 
 export interface RenderSegment {
@@ -66,6 +79,8 @@ export interface RenderSegment {
   caption: string | null;
   template: SceneTemplate;
   backgroundKey: string | null;
+  /** This scene's own narration, laid under it rather than under the episode. */
+  narrationKey: string | null;
   startSeconds: number;
   durationSeconds: number;
   /** True when `durationSeconds` came from a fallback rather than the plan. */
@@ -127,7 +142,22 @@ export function buildRenderPlan(
 
   let cursor = 0;
   const segments: RenderSegment[] = ordered.map((scene) => {
-    const { seconds, isEstimated } = resolveSceneSeconds(scene.estimatedSeconds);
+    const planned = resolveSceneSeconds(scene.estimatedSeconds);
+    let seconds = planned.seconds;
+    let isEstimated = planned.isEstimated;
+
+    // A scene with its own narration is timed to that recording, not to the
+    // estimate someone typed before it existed. The estimate becomes a floor:
+    // a short line on a scene meant to breathe still gets its planned length.
+    const own = scene.narrationSeconds ?? null;
+    if (own !== null && Number.isFinite(own) && own > 0) {
+      const needed = own + SCENE_NARRATION_TAIL_SECONDS;
+      if (needed > seconds) {
+        seconds = needed;
+        isEstimated = true;
+      }
+    }
+
     const segment: RenderSegment = {
       sceneId: scene.id,
       position: scene.position,
@@ -135,6 +165,7 @@ export function buildRenderPlan(
       caption: captionFor(scene),
       template: scene.template,
       backgroundKey: scene.backgroundKey,
+      narrationKey: scene.narrationKey ?? null,
       startSeconds: round3(cursor),
       durationSeconds: round3(seconds),
       durationIsEstimated: isEstimated,
@@ -146,7 +177,12 @@ export function buildRenderPlan(
   // Narration must never be cut off mid-sentence. If the recording outlasts the
   // scene plan, hold the last scene until it finishes rather than truncating —
   // a picture that lingers is a stylistic wrinkle, a clipped word is a defect.
-  const narration = options.narrationSeconds ?? null;
+  //
+  // This only applies to one recording laid under the whole episode. With
+  // per-scene narration each scene has already been timed to its own line, and
+  // stretching the last one on top of that would just add dead air.
+  const hasPerScene = segments.some((segment) => segment.narrationKey !== null);
+  const narration = hasPerScene ? null : options.narrationSeconds ?? null;
   const lastSegment = segments.at(-1);
   if (narration !== null && Number.isFinite(narration) && narration > cursor && lastSegment) {
     const shortfall = narration - cursor;
@@ -174,6 +210,10 @@ export interface RenderReadiness {
   targetWindow: { minSeconds: number; maxSeconds: number } | null;
   /** Total of the scene estimates before any narration fitting was applied. */
   plannedSceneSeconds?: number;
+  /** Scenes carrying their own narration. */
+  perSceneNarrationCount?: number;
+  /** True when a whole-episode recording is also selected. */
+  hasEpisodeNarration?: boolean;
 }
 
 /**
@@ -210,6 +250,24 @@ export function assessRender(readiness: RenderReadiness, plan: RenderPlan): Rend
       `${readiness.scenesWithoutDuration} scene(s) have no planned duration and will run ` +
         `for the ${DEFAULT_SCENE_SECONDS}s default.`,
     );
+  }
+
+  // Both kinds of narration at once would overlap, so per-scene wins and the
+  // episode take is ignored. Saying so is the whole point: silently picking one
+  // is how someone spends an afternoon wondering why a re-record changed nothing.
+  const perScene = readiness.perSceneNarrationCount ?? 0;
+  if (perScene > 0) {
+    if (readiness.hasEpisodeNarration) {
+      warnings.push(
+        `${perScene} scene(s) have their own narration, so the whole-episode recording ` +
+          `is not used. Remove the per-scene takes to go back to one recording.`,
+      );
+    }
+    if (perScene < readiness.sceneCount) {
+      warnings.push(
+        `${readiness.sceneCount - perScene} scene(s) have no narration and will play silent.`,
+      );
+    }
   }
 
   const narration = plan.narrationSeconds;

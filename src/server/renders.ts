@@ -60,7 +60,10 @@ export async function previewRender(
   episodeId: string,
   aspectRatio: AspectRatio,
 ): Promise<RenderPreview> {
-  const { plannedScenes, targetWindow, narration } = await loadPlanInputs(episodeId, aspectRatio);
+  const { plannedScenes, targetWindow, narration, perSceneNarrationCount } = await loadPlanInputs(
+    episodeId,
+    aspectRatio,
+  );
   const scenePlan = buildRenderPlan(plannedScenes, { aspectRatio });
   const plan = buildRenderPlan(plannedScenes, {
     aspectRatio,
@@ -72,6 +75,8 @@ export async function previewRender(
       scenesWithoutDuration: plannedScenes.filter((s) => s.estimatedSeconds === null).length,
       targetWindow,
       plannedSceneSeconds: scenePlan.totalSeconds,
+      perSceneNarrationCount,
+      hasEpisodeNarration: narration !== null,
     },
     plan,
   );
@@ -421,6 +426,7 @@ async function loadPlanInputs(
   plannedScenes: PlannedScene[];
   targetWindow: { minSeconds: number; maxSeconds: number } | null;
   narration: { objectKey: string; seconds: number | null; id: string } | null;
+  perSceneNarrationCount: number;
 }> {
   const sceneRows = await db
     .select()
@@ -428,7 +434,9 @@ async function loadPlanInputs(
     .where(eq(scenes.episodeId, episodeId))
     .orderBy(asc(scenes.position));
 
-  const backgrounds = await loadBackgroundKeys(sceneRows.map((scene) => scene.id));
+  const sceneIds = sceneRows.map((scene) => scene.id);
+  const backgrounds = await loadBackgroundKeys(sceneIds);
+  const sceneNarration = await loadSceneNarration(sceneIds);
 
   const plannedScenes: PlannedScene[] = sceneRows.map((scene) => ({
     id: scene.id,
@@ -439,6 +447,8 @@ async function loadPlanInputs(
     template: scene.template,
     estimatedSeconds: scene.estimatedSeconds === null ? null : Number(scene.estimatedSeconds),
     backgroundKey: backgrounds.get(scene.id) ?? null,
+    narrationKey: sceneNarration.get(scene.id)?.objectKey ?? null,
+    narrationSeconds: sceneNarration.get(scene.id)?.seconds ?? null,
   }));
 
   const [narrationRow] = await db
@@ -462,6 +472,7 @@ async function loadPlanInputs(
 
   return {
     plannedScenes,
+    perSceneNarrationCount: sceneNarration.size,
     targetWindow: await loadTargetWindow(episodeId, aspectRatio),
     narration:
       narrationRow?.objectKey
@@ -473,6 +484,41 @@ async function loadPlanInputs(
           }
         : null,
   };
+}
+
+/**
+ * The selected narration for each scene, when narration was recorded per scene
+ * rather than as one take for the episode.
+ */
+async function loadSceneNarration(
+  sceneIds: string[],
+): Promise<Map<string, { objectKey: string; seconds: number | null }>> {
+  const byScene = new Map<string, { objectKey: string; seconds: number | null }>();
+  if (sceneIds.length === 0) return byScene;
+
+  const rows = await db
+    .select({
+      sceneId: voiceovers.sceneId,
+      objectKey: voiceovers.objectKey,
+      durationSeconds: voiceovers.durationSeconds,
+    })
+    .from(voiceovers)
+    .where(
+      and(
+        inArray(voiceovers.sceneId, sceneIds),
+        eq(voiceovers.isSelected, true),
+        eq(voiceovers.status, "ready"),
+      ),
+    );
+
+  for (const row of rows) {
+    if (!row.sceneId || !row.objectKey) continue;
+    byScene.set(row.sceneId, {
+      objectKey: row.objectKey,
+      seconds: row.durationSeconds === null ? null : Number(row.durationSeconds),
+    });
+  }
+  return byScene;
 }
 
 /** The best available still per scene, preferring the `primary` role. */

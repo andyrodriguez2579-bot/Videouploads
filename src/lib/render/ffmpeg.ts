@@ -182,6 +182,9 @@ export class FfmpegRenderProvider implements RenderProvider {
 
         const segmentPath = path.join(workDir, `segment-${String(index).padStart(4, "0")}.mp4`);
         const background = segment.backgroundKey ? await resolveAsset(segment.backgroundKey) : null;
+        const sceneNarration = segment.narrationKey
+          ? await resolveAsset(segment.narrationKey)
+          : null;
 
         const args = await this.segmentArgs({
           segment,
@@ -189,6 +192,7 @@ export class FfmpegRenderProvider implements RenderProvider {
           workDir,
           index,
           background,
+          narration: sceneNarration,
           headingFont,
           captionFont,
           outputPath: segmentPath,
@@ -215,18 +219,31 @@ export class FfmpegRenderProvider implements RenderProvider {
       // With narration the concat is an intermediate: the mix and the loudness
       // pass happen once over the whole programme, which is the only level at
       // which integrated loudness means anything.
-      const narrationPath = request.narrationPath ?? null;
-      const silentPath = narrationPath ? path.join(workDir, "silent.mp4") : outputPath;
-      await this.concat(segmentPaths, silentPath, workDir, signal);
+      //
+      // Two ways narration can arrive. One recording under the whole episode is
+      // mixed in here. Per-scene narration is already inside the segments, so
+      // it only needs normalising — but either way the loudness pass runs once,
+      // over the finished programme, which is the only level at which
+      // integrated loudness means anything.
+      const perSceneNarration = plan.segments.some((segment) => segment.narrationKey !== null);
+      const episodeNarration = perSceneNarration ? null : request.narrationPath ?? null;
+      const needsAudioPass = Boolean(episodeNarration) || perSceneNarration;
+
+      const joinedPath = needsAudioPass ? path.join(workDir, "joined.mp4") : outputPath;
+      await this.concat(segmentPaths, joinedPath, workDir, signal);
 
       let loudnessLufs: number | null = null;
-      if (narrationPath) {
+      if (needsAudioPass) {
         await onProgress?.({
           completed: plan.segments.length,
           total: plan.segments.length + 1,
-          stage: "Mixing narration",
+          stage: episodeNarration ? "Mixing narration" : "Normalising audio",
         });
-        await this.mixNarration(silentPath, narrationPath, outputPath, signal);
+        if (episodeNarration) {
+          await this.mixNarration(joinedPath, episodeNarration, outputPath, signal);
+        } else {
+          await this.normaliseAudio(joinedPath, outputPath, signal);
+        }
         loudnessLufs = await this.measureLoudness(outputPath, signal);
       }
 
@@ -270,6 +287,7 @@ export class FfmpegRenderProvider implements RenderProvider {
     workDir: string;
     index: number;
     background: string | null;
+    narration: string | null;
     headingFont: string;
     captionFont: string;
     outputPath: string;
@@ -287,14 +305,19 @@ export class FfmpegRenderProvider implements RenderProvider {
       args.push("-f", "lavfi", "-i", `color=c=${CARD_COLOUR}:s=${width}x${height}:r=${fps}`);
     }
 
-    // A silent track keeps every segment's stream layout identical, which the
-    // concat demuxer requires. Narration mixing arrives with the audio stage.
-    args.push(
-      "-f",
-      "lavfi",
-      "-i",
-      `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SAMPLE_RATE}`,
-    );
+    // Every segment carries an audio track, silent or not, because the concat
+    // demuxer requires an identical stream layout throughout. A scene with its
+    // own narration gets that recording; the rest get silence.
+    if (input.narration) {
+      args.push("-i", input.narration);
+    } else {
+      args.push(
+        "-f",
+        "lavfi",
+        "-i",
+        `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SAMPLE_RATE}`,
+      );
+    }
 
     const filters: string[] = [];
     if (background) {
@@ -355,6 +378,9 @@ export class FfmpegRenderProvider implements RenderProvider {
     args.push(
       "-vf",
       filters.join(","),
+      // apad holds silence after the line ends so the segment runs its full
+      // length; without it -shortest would cut the picture to the audio.
+      ...(input.narration ? ["-af", "apad"] : []),
       "-t",
       duration,
       "-r",
@@ -494,6 +520,66 @@ export class FfmpegRenderProvider implements RenderProvider {
       ],
       signal,
       "Mixing narration",
+    );
+  }
+
+  /**
+   * Normalises audio that is already inside the film — the per-scene case,
+   * where each segment carried its own line through the concat.
+   *
+   * Same two-pass approach as the mix, and the video is stream-copied: it was
+   * encoded once already and re-encoding it to touch the audio would cost
+   * quality for nothing.
+   */
+  private async normaliseAudio(
+    inputPath: string,
+    outputPath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const measured = await this.measureForLoudnorm(inputPath, signal);
+    const loudnormFilter = [
+      `loudnorm=I=${LOUDNESS_TARGET_LUFS}`,
+      `TP=${LOUDNESS_TRUE_PEAK_DB}`,
+      `LRA=${LOUDNESS_RANGE}`,
+      ...(measured
+        ? [
+            `measured_I=${measured.input_i}`,
+            `measured_TP=${measured.input_tp}`,
+            `measured_LRA=${measured.input_lra}`,
+            `measured_thresh=${measured.input_thresh}`,
+            `offset=${measured.target_offset}`,
+            "linear=true",
+          ]
+        : []),
+    ].join(":");
+
+    await run(
+      this.ffmpeg,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        inputPath,
+        "-c:v",
+        "copy",
+        "-af",
+        loudnormFilter,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        String(AUDIO_SAMPLE_RATE),
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ],
+      signal,
+      "Normalising audio",
     );
   }
 

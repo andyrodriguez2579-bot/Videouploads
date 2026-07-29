@@ -11,6 +11,7 @@ import { SERVER_ACTION_BODY_LIMIT_MB, parseEnv } from "./env";
 /** Minimum viable environment: local Postgres, local disk, nothing paid. */
 function base(overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
+    NODE_ENV: "test",
     DATABASE_URL: "postgres://historia:historia@localhost:5432/historia",
     SESSION_SECRET: "x".repeat(32),
     ...overrides,

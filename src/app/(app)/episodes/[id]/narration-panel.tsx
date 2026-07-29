@@ -7,10 +7,24 @@ import { Alert, Badge, Field } from "@/components/ui";
 import { formatSeconds } from "@/domain/render";
 import type { ActionState } from "@/lib/action-state";
 
-import { selectNarrationAction, uploadNarrationAction } from "./narration-actions";
+import {
+  deleteNarrationAction,
+  selectNarrationAction,
+  uploadNarrationAction,
+} from "./narration-actions";
+
+export interface SceneNarrationRow {
+  sceneId: string;
+  position: number;
+  heading: string;
+  /** Planned length, so an over-long line is visible before rendering. */
+  estimatedSeconds: string | null;
+  voiceover: VoiceoverRow | null;
+}
 
 export interface VoiceoverRow {
   id: string;
+  sceneId: string | null;
   source: string;
   provider: string | null;
   objectKey: string | null;
@@ -32,12 +46,15 @@ function Submit({ idle, busy }: { idle: string; busy: string }) {
 export function NarrationPanel({
   episodeId,
   voiceovers,
+  scenes,
 }: {
   episodeId: string;
   voiceovers: VoiceoverRow[];
+  scenes: SceneNarrationRow[];
 }) {
   const [state, action] = useActionState<ActionState, FormData>(uploadNarrationAction, {});
-  const selected = voiceovers.find((v) => v.isSelected);
+  const episodeTakes = voiceovers.filter((v) => v.sceneId === null);
+  const selected = episodeTakes.find((v) => v.isSelected);
 
   return (
     <section className="card">
@@ -72,13 +89,13 @@ export function NarrationPanel({
         <Submit idle="Upload narration" busy="Uploading…" />
       </form>
 
-      {voiceovers.length === 0 ? (
+      {episodeTakes.length === 0 ? (
         <p className="text-sm text-black/60">
           No narration yet. Renders will be silent until one is uploaded.
         </p>
       ) : (
         <ul className="divide-y divide-black/10">
-          {voiceovers.map((row) => (
+          {episodeTakes.map((row) => (
             <li key={row.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
               {row.isSelected ? <Badge tone="good">Selected</Badge> : <Badge>Not used</Badge>}
               <span className="text-black/70">{row.source.replace("_", " ")}</span>
@@ -109,6 +126,75 @@ export function NarrationPanel({
                   </button>
                 </form>
               ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h3 className="mb-1 mt-8 font-serif text-base font-semibold">Per scene</h3>
+      <p className="mb-3 text-xs text-black/60">
+        Record scene by scene and a fluffed line means re-recording that scene, not the
+        episode. Any scene with its own narration takes precedence: the whole-episode
+        recording above is then ignored, and each scene is timed to its own line.
+      </p>
+
+      {scenes.length === 0 ? (
+        <p className="text-sm text-black/60">Add scenes first, on the Scene plan tab.</p>
+      ) : (
+        <ul className="divide-y divide-black/10">
+          {scenes.map((scene) => (
+            <li key={scene.sceneId} className="py-3">
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <span className="tabular-nums text-black/50">{scene.position}</span>
+                <span className="font-medium">{scene.heading}</span>
+                {scene.voiceover ? (
+                  <>
+                    <Badge tone="good">Recorded</Badge>
+                    <span className="tabular-nums text-black/70">
+                      {scene.voiceover.durationSeconds
+                        ? formatSeconds(Number(scene.voiceover.durationSeconds))
+                        : "—"}
+                    </span>
+                    {scene.voiceover.objectKey ? (
+                      <a
+                        className="link"
+                        href={`/api/files/${scene.voiceover.objectKey}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Listen
+                      </a>
+                    ) : null}
+                    <form action={deleteNarrationAction}>
+                      <input type="hidden" name="episodeId" value={episodeId} />
+                      <input type="hidden" name="voiceoverId" value={scene.voiceover.id} />
+                      <button type="submit" className="btn-secondary text-xs">
+                        Remove
+                      </button>
+                    </form>
+                  </>
+                ) : (
+                  <Badge>Silent</Badge>
+                )}
+              </div>
+
+              <form action={action} className="mt-2 flex flex-wrap items-center gap-2">
+                <input type="hidden" name="episodeId" value={episodeId} />
+                <input type="hidden" name="sceneId" value={scene.sceneId} />
+                <input
+                  id={`scene-file-${scene.sceneId}`}
+                  name="file"
+                  type="file"
+                  accept="audio/*"
+                  required
+                  className="input max-w-xs text-xs"
+                  aria-label={`Narration for scene ${scene.position}: ${scene.heading}`}
+                />
+                <Submit
+                  idle={scene.voiceover ? "Replace" : "Upload"}
+                  busy="Uploading…"
+                />
+              </form>
             </li>
           ))}
         </ul>

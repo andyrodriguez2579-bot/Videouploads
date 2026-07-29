@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ASPECT_DIMENSIONS,
+  SCENE_NARRATION_TAIL_SECONDS,
   DEFAULT_SCENE_SECONDS,
   MAX_SCENE_SECONDS,
   MIN_SCENE_SECONDS,
@@ -211,6 +212,79 @@ describe("fitting the plan to narration", () => {
       plan,
     );
 
+    expect(decision.warnings).toEqual([]);
+  });
+});
+
+describe("per-scene narration", () => {
+  function withNarration(seconds: number | null, estimated: number | null, id = "a") {
+    return scene({ id, position: 1, estimatedSeconds: estimated, narrationSeconds: seconds, narrationKey: seconds === null ? null : `k-${id}` });
+  }
+
+  it("times a scene to its own line plus a tail", () => {
+    const plan = buildRenderPlan([withNarration(9, 4)], { aspectRatio: "16:9" });
+    expect(plan.segments[0]!.durationSeconds).toBe(9 + SCENE_NARRATION_TAIL_SECONDS);
+  });
+
+  it("keeps the planned length when it already exceeds the line", () => {
+    // The estimate is a floor: a short line on a scene meant to breathe still
+    // gets the length someone deliberately planned for it.
+    const plan = buildRenderPlan([withNarration(3, 12)], { aspectRatio: "16:9" });
+    expect(plan.segments[0]!.durationSeconds).toBe(12);
+  });
+
+  it("carries each scene's narration key onto its segment", () => {
+    const plan = buildRenderPlan(
+      [withNarration(5, 4, "a"), scene({ id: "b", position: 2, estimatedSeconds: 3 })],
+      { aspectRatio: "16:9" },
+    );
+    expect(plan.segments.map((s) => s.narrationKey)).toEqual(["k-a", null]);
+  });
+
+  it("lays scenes end to end using their fitted durations", () => {
+    const plan = buildRenderPlan(
+      [withNarration(6, 2, "a"), { ...withNarration(4, 2, "b"), position: 2 }],
+      { aspectRatio: "16:9" },
+    );
+    expect(plan.segments.map((s) => s.startSeconds)).toEqual([0, 6.4]);
+    expect(plan.totalSeconds).toBe(10.8);
+  });
+
+  it("does not also stretch the last scene for an episode recording", () => {
+    // Per-scene wins. Stretching on top of it would just add dead air.
+    const plan = buildRenderPlan([withNarration(6, 2)], {
+      aspectRatio: "16:9",
+      narrationSeconds: 60,
+    });
+    expect(plan.totalSeconds).toBe(6.4);
+    expect(plan.narrationSeconds).toBeNull();
+  });
+
+  it("warns that an episode recording is ignored when scenes have their own", () => {
+    const plan = buildRenderPlan([withNarration(6, 2)], { aspectRatio: "16:9" });
+    const decision = assessRender(
+      { sceneCount: 1, scenesWithoutDuration: 0, targetWindow: null, perSceneNarrationCount: 1, hasEpisodeNarration: true },
+      plan,
+    );
+    expect(decision.canRender).toBe(true);
+    expect(decision.warnings.join(" ")).toMatch(/whole-episode recording is not used/i);
+  });
+
+  it("warns about scenes left silent in per-scene mode", () => {
+    const plan = buildRenderPlan([withNarration(6, 2)], { aspectRatio: "16:9" });
+    const decision = assessRender(
+      { sceneCount: 4, scenesWithoutDuration: 0, targetWindow: null, perSceneNarrationCount: 1 },
+      plan,
+    );
+    expect(decision.warnings.join(" ")).toMatch(/3 scene\(s\) have no narration/i);
+  });
+
+  it("stays silent when every scene is covered", () => {
+    const plan = buildRenderPlan([withNarration(6, 2)], { aspectRatio: "16:9" });
+    const decision = assessRender(
+      { sceneCount: 1, scenesWithoutDuration: 0, targetWindow: null, perSceneNarrationCount: 1 },
+      plan,
+    );
     expect(decision.warnings).toEqual([]);
   });
 });

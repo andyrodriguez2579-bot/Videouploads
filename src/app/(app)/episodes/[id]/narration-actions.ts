@@ -6,7 +6,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
 import { db } from "@/db/client";
@@ -63,6 +63,9 @@ export async function uploadNarrationAction(
   const episodeId = String(formData.get("episodeId") ?? "");
   if (!episodeId) return { error: "No episode was given." };
 
+  // Empty means a recording for the whole episode; set means one scene's line.
+  const sceneId = String(formData.get("sceneId") ?? "") || null;
+
   const file = formData.get("file");
   if (!(file instanceof File) || file.size === 0) {
     return { fields: { file: "Choose an audio file." } };
@@ -114,17 +117,26 @@ export async function uploadNarrationAction(
     contentType: file.type || undefined,
   });
 
-  // One selected full-episode narration at a time: the mix takes exactly one
-  // track, and leaving two selected would make which one silently arbitrary.
+  // One selected recording per level: the mix takes exactly one track for the
+  // episode, or one per scene. Leaving two selected would make which one plays
+  // silently arbitrary. Deselecting is scoped so uploading a scene's line does
+  // not quietly deselect another scene's.
   await db
     .update(voiceovers)
     .set({ isSelected: false, updatedAt: new Date() })
-    .where(and(eq(voiceovers.episodeId, episodeId), eq(voiceovers.isSelected, true)));
+    .where(
+      and(
+        eq(voiceovers.episodeId, episodeId),
+        eq(voiceovers.isSelected, true),
+        sceneId ? eq(voiceovers.sceneId, sceneId) : isNull(voiceovers.sceneId),
+      ),
+    );
 
   const [row] = await db
     .insert(voiceovers)
     .values({
       episodeId,
+      sceneId,
       source: "upload",
       language: episode.language,
       storageDriver: stored.driver,
@@ -145,7 +157,7 @@ export async function uploadNarrationAction(
     entityType: "voiceover",
     entityId: row?.id ?? null,
     episodeId,
-    summary: `Uploaded narration "${file.name}"${
+    summary: `Uploaded ${sceneId ? "scene" : "episode"} narration "${file.name}"${
       durationSeconds === null ? "" : ` (${durationSeconds.toFixed(1)}s)`
     }`,
   });
@@ -169,10 +181,24 @@ export async function selectNarrationAction(formData: FormData): Promise<void> {
   const voiceoverId = String(formData.get("voiceoverId") ?? "");
   if (!episodeId || !voiceoverId) return;
 
+  const [target] = await db
+    .select({ sceneId: voiceovers.sceneId })
+    .from(voiceovers)
+    .where(eq(voiceovers.id, voiceoverId))
+    .limit(1);
+  if (!target) return;
+
+  // Deselect only within the same level. Clearing every take on the episode
+  // would silence every other scene the moment one scene's line was swapped.
   await db
     .update(voiceovers)
     .set({ isSelected: false, updatedAt: new Date() })
-    .where(eq(voiceovers.episodeId, episodeId));
+    .where(
+      and(
+        eq(voiceovers.episodeId, episodeId),
+        target.sceneId ? eq(voiceovers.sceneId, target.sceneId) : isNull(voiceovers.sceneId),
+      ),
+    );
   await db
     .update(voiceovers)
     .set({ isSelected: true, updatedAt: new Date() })
@@ -184,7 +210,44 @@ export async function selectNarrationAction(formData: FormData): Promise<void> {
     entityType: "voiceover",
     entityId: voiceoverId,
     episodeId,
-    summary: "Selected the narration used for rendering",
+    summary: target.sceneId
+      ? "Selected the narration used for one scene"
+      : "Selected the narration used for the episode",
+  });
+
+  revalidatePath(`/episodes/${episodeId}`);
+}
+
+export async function deleteNarrationAction(formData: FormData): Promise<void> {
+  const user = await requireUser();
+  if (!canEdit(user.role)) throw new Error("Your role does not allow deleting narration.");
+
+  const episodeId = String(formData.get("episodeId") ?? "");
+  const voiceoverId = String(formData.get("voiceoverId") ?? "");
+  if (!episodeId || !voiceoverId) return;
+
+  const [row] = await db.select().from(voiceovers).where(eq(voiceovers.id, voiceoverId)).limit(1);
+  if (!row) return;
+
+  // Row first: it is the record of truth, and an orphaned object is harmless
+  // where a row pointing at a deleted file is not.
+  await db.delete(voiceovers).where(eq(voiceovers.id, voiceoverId));
+
+  if (row.objectKey) {
+    try {
+      await getStorage().delete(row.objectKey);
+    } catch (error) {
+      console.error("[narration] failed to delete stored audio", { key: row.objectKey, error });
+    }
+  }
+
+  await recordAudit({
+    actor: user,
+    action: "narration.delete",
+    entityType: "voiceover",
+    entityId: voiceoverId,
+    episodeId,
+    summary: `Deleted ${row.sceneId ? "scene" : "episode"} narration`,
   });
 
   revalidatePath(`/episodes/${episodeId}`);

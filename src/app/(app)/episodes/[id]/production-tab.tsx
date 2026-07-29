@@ -1,5 +1,9 @@
 import { Badge, EmptyState, MilestoneNotice } from "@/components/ui";
-import { NarrationPanel, type VoiceoverRow } from "./narration-panel";
+import {
+  NarrationPanel,
+  type SceneNarrationRow,
+  type VoiceoverRow,
+} from "./narration-panel";
 import { RenderPanel, type RenderRow } from "./render-panel";
 import {
   CAPTION_MODE_LABELS,
@@ -21,6 +25,7 @@ export function ProductionTab({
   captionMode,
   voiceovers,
   captions,
+  sceneNarration,
   renders,
   renderPlan,
 }: {
@@ -28,6 +33,7 @@ export function ProductionTab({
   narrationMode: NarrationMode;
   captionMode: CaptionMode;
   voiceovers: VoiceoverRow[];
+  sceneNarration: SceneNarrationRow[];
   captions: {
     id: string;
     format: string;
@@ -47,7 +53,11 @@ export function ProductionTab({
 }) {
   return (
     <div className="space-y-6">
-      <NarrationPanel episodeId={episodeId} voiceovers={voiceovers} />
+      <NarrationPanel
+        episodeId={episodeId}
+        voiceovers={voiceovers}
+        scenes={sceneNarration}
+      />
 
       <RenderPanel
         episodeId={episodeId}
