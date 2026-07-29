@@ -118,9 +118,12 @@ export function resolveSceneSeconds(estimated: number | null): {
  * *for the screen*, so it wins; narration is spoken, not shown, and is only
  * borrowed as a legible fallback for a scene that has no on-screen copy.
  */
-function captionFor(scene: PlannedScene): string | null {
+function captionFor(scene: PlannedScene, suppressNarration = false): string | null {
   const onScreen = scene.onScreenText?.trim();
   if (onScreen) return onScreen;
+  // With subtitles burned in, borrowing the narration here would print the same
+  // words twice, in two different places, in the same frame.
+  if (suppressNarration) return null;
   const narration = scene.narrationText?.trim();
   if (!narration) return null;
   // A full narration paragraph would overflow the frame; one sentence reads.
@@ -135,7 +138,16 @@ function captionFor(scene: PlannedScene): string | null {
  */
 export function buildRenderPlan(
   scenes: PlannedScene[],
-  options: { aspectRatio: AspectRatio; fps?: number; narrationSeconds?: number | null },
+  options: {
+    aspectRatio: AspectRatio;
+    fps?: number;
+    narrationSeconds?: number | null;
+    /**
+     * Set when subtitles will be burned in: the narration then appears as a
+     * caption *and* as a subtitle, which is the same sentence twice.
+     */
+    suppressNarrationCaptions?: boolean;
+  },
 ): RenderPlan {
   const { width, height } = ASPECT_DIMENSIONS[options.aspectRatio];
   const ordered = [...scenes].sort((a, b) => a.position - b.position);
@@ -162,7 +174,7 @@ export function buildRenderPlan(
       sceneId: scene.id,
       position: scene.position,
       heading: scene.heading,
-      caption: captionFor(scene),
+      caption: captionFor(scene, options.suppressNarrationCaptions),
       template: scene.template,
       backgroundKey: scene.backgroundKey,
       narrationKey: scene.narrationKey ?? null,

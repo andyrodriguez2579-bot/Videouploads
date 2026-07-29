@@ -134,8 +134,16 @@ export function RenderPanel({
             </select>
           </Field>
         </div>
+        <label className="flex items-center gap-2 pb-2 text-sm">
+          <input type="checkbox" name="burnCaptions" className="h-4 w-4" />
+          Burn subtitles in
+        </label>
         <Submit idle="Start render" busy="Starting…" disabled={!canRender} />
       </form>
+      <p className="mt-2 text-xs text-black/60">
+        Burn them in for silent-autoplay feeds. For YouTube, leave this off and upload the
+        <code> .srt</code> from the Subtitles panel so viewers can turn them off.
+      </p>
 
       <h3 className="mb-2 mt-6 font-serif text-base font-semibold">Renders</h3>
       {renders.length === 0 ? (

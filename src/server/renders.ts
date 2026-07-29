@@ -31,6 +31,8 @@ import { enqueueRender } from "@/lib/queue";
 import { getRenderProvider } from "@/lib/render";
 import { buildObjectKey, getStorage } from "@/lib/storage";
 
+import { getSelectedCaptions } from "./captions";
+
 /**
  * Rendering orchestration: assemble the plan from the database, create the
  * render and job rows, run the encoder, and store the result.
@@ -101,6 +103,11 @@ export async function startRender(input: {
   kind: RenderKind;
   aspectRatio: AspectRatio;
   label?: string | null;
+  /**
+   * Burn captions into the picture. Right for silent-autoplay feeds; wrong for
+   * YouTube, which wants the sidecar file so viewers can turn them off.
+   */
+  burnCaptions?: boolean;
 }): Promise<{ renderId: string; jobId: string }> {
   const preview = await previewRender(input.episodeId, input.aspectRatio);
   if (!preview.canRender) {
@@ -130,6 +137,7 @@ export async function startRender(input: {
         plannedSeconds: preview.plan.totalSeconds,
         sceneCount: preview.plan.segments.length,
         warnings: preview.warnings,
+        burnCaptions: input.burnCaptions ?? false,
       },
     })
     .returning();
@@ -228,10 +236,19 @@ export async function runRenderJob(renderId: string): Promise<void> {
   const workDir = await mkdtemp(path.join(tmpdir(), "historia-job-"));
 
   try {
+    const details = (render.details ?? {}) as Record<string, unknown>;
+    const wantsCaptions = details.burnCaptions === true;
+    const selectedCaptions = wantsCaptions
+      ? await getSelectedCaptions(render.episodeId)
+      : null;
+
     const { plannedScenes, narration } = await loadPlanInputs(render.episodeId, aspectRatio);
     const plan = buildRenderPlan(plannedScenes, {
       aspectRatio,
       narrationSeconds: narration?.seconds ?? null,
+      // Only when captions will actually be drawn: without them the narration
+      // caption is the only text on screen and should stay.
+      suppressNarrationCaptions: selectedCaptions !== null,
     });
     if (plan.segments.length === 0) throw new Error("The episode has no scenes to render.");
 
@@ -243,6 +260,7 @@ export async function runRenderJob(renderId: string): Promise<void> {
       outputPath,
       resolveAsset: (key) => stageAsset(storage, key, workDir),
       narrationPath: narration ? await stageAsset(storage, narration.objectKey, workDir) : null,
+      subtitleSrt: selectedCaptions?.content ?? null,
       onProgress: async (progress) => {
         if (!job) return;
         const percent = Math.min(

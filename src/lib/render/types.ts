@@ -23,6 +23,12 @@ export interface RenderRequest {
    * selected. Mixed and loudness-normalised in a single final pass.
    */
   narrationPath?: string | null;
+  /**
+   * SRT to burn into the picture, if the operator asked for it. Burned-in
+   * captions are for silent-autoplay feeds; a YouTube upload wants the sidecar
+   * file instead, which is why this is a choice rather than always on.
+   */
+  subtitleSrt?: string | null;
   onProgress?: (progress: RenderProgress) => void | Promise<void>;
   /** Aborts a run that is no longer wanted; the process is killed. */
   signal?: AbortSignal;

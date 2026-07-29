@@ -1,9 +1,10 @@
-import { Badge, EmptyState, MilestoneNotice } from "@/components/ui";
+import { MilestoneNotice } from "@/components/ui";
 import {
   NarrationPanel,
   type SceneNarrationRow,
   type VoiceoverRow,
 } from "./narration-panel";
+import { CaptionsPanel, type CaptionRow } from "./captions-panel";
 import { RenderPanel, type RenderRow } from "./render-panel";
 import {
   CAPTION_MODE_LABELS,
@@ -34,14 +35,7 @@ export function ProductionTab({
   captionMode: CaptionMode;
   voiceovers: VoiceoverRow[];
   sceneNarration: SceneNarrationRow[];
-  captions: {
-    id: string;
-    format: string;
-    source: string;
-    cueCount: number | null;
-    status: string;
-    humanReviewed: boolean;
-  }[];
+  captions: CaptionRow[];
   renders: RenderRow[];
   renderPlan: {
     plannedSeconds: number;
@@ -58,6 +52,8 @@ export function ProductionTab({
         voiceovers={voiceovers}
         scenes={sceneNarration}
       />
+
+      <CaptionsPanel episodeId={episodeId} captions={captions} />
 
       <RenderPanel
         episodeId={episodeId}
@@ -85,37 +81,11 @@ export function ProductionTab({
         </p>
       </section>
 
-      <section className="card">
-        <h2 className="mb-3 font-serif text-lg font-semibold">Subtitles</h2>
-        {captions.length === 0 ? (
-          <EmptyState
-            title="No subtitle files"
-            description="Import an SRT/VTT, or generate them locally with faster-whisper, in Milestone 2."
-          />
-        ) : (
-          <ul className="divide-y divide-black/10 text-sm">
-            {captions.map((c) => (
-              <li key={c.id} className="flex items-center justify-between gap-2 py-2.5">
-                <span>
-                  {c.format.toUpperCase()} · {c.source}
-                  {c.cueCount ? ` · ${c.cueCount} cues` : ""}
-                </span>
-                <span className="flex gap-1.5">
-                  <Badge tone={c.humanReviewed ? "good" : "warn"}>
-                    {c.humanReviewed ? "Reviewed" : "Unreviewed"}
-                  </Badge>
-                  <Badge>{c.status}</Badge>
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
       <MilestoneNotice milestone="Milestone 2 — still to come">
         <p>
-          Subtitles: import an SRT/VTT, or generate timings locally with faster-whisper. Narration
-          can also be generated locally with Piper rather than uploaded. Neither is built yet.
+          Narration can also be generated locally with Piper rather than recorded, and
+          faster-whisper can time subtitles from the audio when a read departs from the script.
+          Neither is built yet.
         </p>
       </MilestoneNotice>
     </div>

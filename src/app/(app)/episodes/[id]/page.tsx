@@ -325,6 +325,8 @@ export default async function EpisodePage({
                 cueCount: c.cueCount,
                 status: c.status,
                 humanReviewed: c.humanReviewed,
+                provider: c.provider,
+                isSelected: c.isSelected,
               }))}
               renders={renderRows.map(({ render, progress, stage, jobError }) => ({
                 id: render.id,

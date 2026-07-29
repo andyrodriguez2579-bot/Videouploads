@@ -34,7 +34,8 @@ export async function startRenderAction(
     // A vertical cut is a short by definition; that is the frame it publishes in.
     const kind: RenderKind = aspectRatio === "9:16" ? "short_form" : "long_form";
 
-    const { renderId } = await startRender({ episodeId, kind, aspectRatio });
+    const burnCaptions = formData.get("burnCaptions") === "on";
+    const { renderId } = await startRender({ episodeId, kind, aspectRatio, burnCaptions });
 
     await recordAudit({
       actor: user,
@@ -42,7 +43,9 @@ export async function startRenderAction(
       entityType: "render",
       entityId: renderId,
       episodeId,
-      summary: `Started a ${aspectRatio} ${kind.replace("_", " ")} render`,
+      summary:
+        `Started a ${aspectRatio} ${kind.replace("_", " ")} render` +
+        (burnCaptions ? " with burned-in subtitles" : ""),
     });
 
     revalidatePath(`/episodes/${episodeId}`);

@@ -28,7 +28,7 @@ The app runs end to end with **no paid API and no cloud account**:
 | Storage | Local filesystem | Cloudflare R2 / Amazon S3 |
 | Auth | Local email + password | Supabase Auth |
 | Narration | Upload your own file, or Piper (local) | ElevenLabs / OpenAI |
-| Subtitles | Upload SRT/VTT, or faster-whisper (local) | Hosted ASR |
+| Subtitles | Generated from the script, or import SRT/VTT | Hosted ASR |
 | Scene plan | Written by you | OpenAI / Anthropic |
 | Rendering | FFmpeg + Remotion, on your machine | — |
 | Publishing | Manual upload | Platform APIs |
@@ -212,7 +212,9 @@ npm run render:sample -- ./still.mp4 16:9 photo.jpg   # over a real still
 
 ## Testing
 
-**Unit** — [`src/lib/env.test.ts`](src/lib/env.test.ts) covers the paired
+**Unit** — [`src/domain/subtitles.test.ts`](src/domain/subtitles.test.ts) covers
+cue timing, line breaking and SRT/VTT round-tripping;
+[`src/lib/env.test.ts`](src/lib/env.test.ts) covers the paired
 configuration requirements, including the upload ceiling;
 [`src/domain/workflow.test.ts`](src/domain/workflow.test.ts) covers the
 state machine and every approval gate;
@@ -592,10 +594,54 @@ Assertions now target the finished render's own row, which shows the duration
 ffprobe read back off the file, and check the payload is too large to be silence.
 A test that can pass without the feature working is worse than no test.
 
+### 2026-07-28 — Subtitles, generated from the script
+
+**Decision: generate from the script, do not transcribe.** Speech recognition
+exists to discover what was said. Here that is already known — written down,
+reviewed and approved. Running the narration through ASR would take text that is
+correct by construction and introduce errors into it, and the errors it makes are
+exactly the words this series cannot afford to get wrong: place names and people.
+faster-whisper earns its place later for *timing within* a scene, not for words.
+
+Cue timings come from the same render plan the video is built from, so a subtitle
+cannot drift onto the wrong picture: change a scene's length and the cues move
+with it.
+
+The line-breaking rules are the conventional ones — 42 characters a line, two
+lines a cue, 17 characters per second of reading time, and cues that neither
+flash nor outstay their welcome. Breaks are chosen at sentence ends first, then
+clause boundaries, and only mid-clause as a last resort, because a subtitle
+broken mid-thought is harder to read than a slightly long one.
+
+Both delivery routes are supported, because they are for different places. The
+`.srt` sidecar is for YouTube, where viewers can turn it off and the platform
+indexes the text. Burned-in captions are for silent-autoplay feeds, and are a
+per-render choice rather than a default.
+
+Generated captions are never marked reviewed. The words are right by
+construction; where lines break and how long they hold are judgements a machine
+should not sign off.
+
+Three things only a rendered frame revealed:
+
+- **Burned-in subtitles came out roughly four times too large**, filling the
+  frame. ffmpeg converts an SRT to ASS on a 384×288 virtual canvas, so
+  `force_style` sizes are in *those* units, not pixels — treating them as pixels
+  on a 1080p frame magnifies everything 3.75×. Sizes are now expressed against
+  that canvas, which also makes one set of numbers correct for 16:9 and 9:16.
+- **The subtitle box never drew.** With `BorderStyle=3` libass fills from
+  `OutlineColour`, sized by `Outline` — not from `BackColour`. `Outline=0` meant
+  no box, which is invisible over a bright archival still.
+- **The same sentence appeared twice.** A scene with no on-screen text borrows
+  its narration for the lower third, which with subtitles burned in printed the
+  line as a caption *and* as a subtitle. The caption is now suppressed when
+  captions are being drawn.
+
 ### Next — the rest of Milestone 2
 
-- **Subtitles** — SRT/VTT import, then faster-whisper timing locally.
-- **Local narration generation** with Piper, as an alternative to uploading.
+- **Local narration generation** with Piper, as an alternative to recording.
+- **faster-whisper** for timing cues against the audio, for reads that depart
+  from the script.
 - **Richer templates** — Ken Burns motion on stills, and per-template layouts
   rather than one shared lower-third.
 

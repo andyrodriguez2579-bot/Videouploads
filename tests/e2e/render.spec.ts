@@ -203,3 +203,64 @@ test.describe("per-scene narration", () => {
     expect(body.length).toBeGreaterThan(60_000);
   });
 });
+
+test.describe("subtitles", () => {
+  test("generates cues from the script and burns them into a render", async ({ page }) => {
+    test.setTimeout(180_000);
+    await signIn(page, OWNER);
+
+    await page.goto("/episodes/new");
+    await page.getByLabel("Title", { exact: true }).fill(`Render — subtitles ${Date.now()}`);
+    await page.getByRole("button", { name: "Create episode" }).click();
+    await expect(page).toHaveURL(/\/episodes\/[0-9a-f-]{36}/);
+    const episodeUrl = page.url();
+
+    await page.goto(`${episodeUrl}?tab=scenes`);
+    await page.getByLabel("Heading", { exact: true }).fill("Santo Domingo");
+    await page.getByLabel("Estimated seconds").fill("6");
+    await page
+      .getByLabel("Narration", { exact: true })
+      .fill("Santo Domingo, mil cuatrocientos noventa y seis. La primera ciudad europea.");
+    await page.getByRole("button", { name: "Add scene" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Scene added" })).toBeVisible();
+
+    await page.goto(`${episodeUrl}?tab=production`);
+    const captions = panel(page, "Subtitles");
+
+    await captions.getByRole("button", { name: "Generate from script" }).click();
+    await expect(page.getByRole("status").filter({ hasText: /Generated \d+ cue/ })).toBeVisible();
+
+    // Generated cues are never pre-approved: a machine timed them.
+    await expect(captions).toContainText("Unchecked");
+
+    // The sidecar file is real SRT, and carries the script's words verbatim.
+    const srtHref = await captions.getByRole("link", { name: ".srt" }).getAttribute("href");
+    const srt = await (await page.request.get(srtHref!)).text();
+    expect(srt).toMatch(/^1\n00:00:00,000 --> 00:00:0\d,\d{3}\n/);
+
+    // Cue text is wrapped to a readable line width, so the sentence is only
+    // recoverable once the line breaks are collapsed.
+    const flattened = srt.replace(/\s+/g, " ");
+    expect(flattened).toContain("Santo Domingo, mil cuatrocientos noventa y seis.");
+    expect(flattened).toContain("La primera ciudad europea.");
+
+    // No line may exceed the readable width the wrapper enforces.
+    const textLines = srt
+      .split("\n")
+      .filter((line) => line.trim() !== "" && !/^\d+$/.test(line) && !line.includes("-->"));
+    expect(textLines.length).toBeGreaterThan(0);
+    for (const line of textLines) expect(line.trim().length).toBeLessThanOrEqual(42);
+
+    // WebVTT is offered for the web player, converted from the same source.
+    const vttHref = await captions.getByRole("link", { name: ".vtt" }).getAttribute("href");
+    const vtt = await (await page.request.get(vttHref!)).text();
+    expect(vtt.startsWith("WEBVTT")).toBe(true);
+
+    await page.getByRole("checkbox", { name: "Burn subtitles in" }).check();
+    await page.getByRole("button", { name: "Start render" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Render started" })).toBeVisible();
+
+    await expect(page.getByRole("link", { name: "Watch" })).toBeVisible({ timeout: 150_000 });
+    await expect(finishedRender(page)).toContainText("0:06");
+  });
+});

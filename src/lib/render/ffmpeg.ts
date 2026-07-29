@@ -69,6 +69,43 @@ async function firstExisting(candidates: string[]): Promise<string | null> {
 }
 
 /**
+ * The virtual canvas ffmpeg gives an SRT when it converts one to ASS. Sizes in
+ * `force_style` are in *these* units, not pixels — libass scales the whole
+ * script to the frame afterwards.
+ *
+ * Getting this wrong is not subtle: treating the numbers as pixels on a 1080p
+ * frame magnifies everything 3.75x, which fills the screen with one subtitle.
+ */
+const ASS_SCRIPT_HEIGHT = 288;
+
+/**
+ * libass styling for burned-in captions.
+ *
+ * Because the units are script-relative, one set of numbers is correct for both
+ * a 16:9 documentary and a 9:16 short — libass does the scaling.
+ *
+ * Opaque box rather than a drop shadow: archival stills are unpredictable, and
+ * a shadow that works over a dark photograph disappears over a bright one.
+ */
+function subtitleStyle(): string {
+  return [
+    "FontName=DejaVu Sans",
+    `FontSize=${Math.round(ASS_SCRIPT_HEIGHT / 18)}`,
+    "PrimaryColour=&H00FFFFFF",
+    // With BorderStyle=3 libass fills the box from OutlineColour, sized by
+    // Outline — not from BackColour, which only shadows. Outline=0 here means
+    // no box at all, which is invisible over a bright archival still.
+    "OutlineColour=&H90000000",
+    "BorderStyle=3",
+    "Outline=3",
+    "Shadow=0",
+    // Bottom-centred, and low enough to clear the lower-third heading.
+    "Alignment=2",
+    `MarginV=${Math.round(ASS_SCRIPT_HEIGHT / 12)}`,
+  ].join(",");
+}
+
+/**
  * Escapes a path for use *inside* a filter argument. ffmpeg parses `:` as an
  * option separator and `'` as quoting even after shell argv splitting, so a
  * path containing either would silently corrupt the filter graph.
@@ -229,8 +266,16 @@ export class FfmpegRenderProvider implements RenderProvider {
       const episodeNarration = perSceneNarration ? null : request.narrationPath ?? null;
       const needsAudioPass = Boolean(episodeNarration) || perSceneNarration;
 
+      // Subtitles are burned during the join, not per segment: cue timings are
+      // relative to the whole film, and a segment knows nothing about where it
+      // sits in it.
+      const subtitlePath = request.subtitleSrt
+        ? path.join(workDir, "captions.srt")
+        : null;
+      if (subtitlePath) await writeFile(subtitlePath, request.subtitleSrt!, "utf8");
+
       const joinedPath = needsAudioPass ? path.join(workDir, "joined.mp4") : outputPath;
-      await this.concat(segmentPaths, joinedPath, workDir, signal);
+      await this.concat(segmentPaths, joinedPath, workDir, signal, subtitlePath);
 
       let loudnessLufs: number | null = null;
       if (needsAudioPass) {
@@ -415,6 +460,7 @@ export class FfmpegRenderProvider implements RenderProvider {
     outputPath: string,
     workDir: string,
     signal: AbortSignal | undefined,
+    subtitlePath: string | null = null,
   ): Promise<void> {
     const listPath = path.join(workDir, "segments.txt");
     // The concat demuxer's own quoting: single quotes are escaped as '\''.
@@ -436,14 +482,29 @@ export class FfmpegRenderProvider implements RenderProvider {
         "0",
         "-i",
         listPath,
-        "-c",
-        "copy",
+        // Stream-copy unless subtitles have to be drawn in, which needs pixels.
+        ...(subtitlePath
+          ? [
+              "-vf",
+              `subtitles='${escapeFilterPath(subtitlePath)}':force_style='${subtitleStyle()}'`,
+              "-c:v",
+              "libx264",
+              "-preset",
+              "veryfast",
+              "-crf",
+              "20",
+              "-pix_fmt",
+              "yuv420p",
+              "-c:a",
+              "copy",
+            ]
+          : ["-c", "copy"]),
         "-movflags",
         "+faststart",
         outputPath,
       ],
       signal,
-      "Joining scenes",
+      subtitlePath ? "Joining scenes and burning in subtitles" : "Joining scenes",
     );
   }
 
