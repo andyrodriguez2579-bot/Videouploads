@@ -436,6 +436,29 @@ export class FfmpegRenderProvider implements RenderProvider {
     outputPath: string,
     signal: AbortSignal | undefined,
   ): Promise<void> {
+    // Two passes, not one. Single-pass loudnorm works forward through the file
+    // and can only estimate, which on real speech lands a couple of LU off the
+    // target — a constant tone hides this, a human voice does not. Measuring
+    // first and feeding the numbers back lets it apply a known correction.
+    const measured = await this.measureForLoudnorm(narrationPath, signal);
+    const loudnormFilter = [
+      `loudnorm=I=${LOUDNESS_TARGET_LUFS}`,
+      `TP=${LOUDNESS_TRUE_PEAK_DB}`,
+      `LRA=${LOUDNESS_RANGE}`,
+      ...(measured
+        ? [
+            `measured_I=${measured.input_i}`,
+            `measured_TP=${measured.input_tp}`,
+            `measured_LRA=${measured.input_lra}`,
+            `measured_thresh=${measured.input_thresh}`,
+            `offset=${measured.target_offset}`,
+            // Linear gain preserves the performance; dynamic mode would ride
+            // the level and flatten a deliberate delivery.
+            "linear=true",
+          ]
+        : []),
+    ].join(":");
+
     await run(
       this.ffmpeg,
       [
@@ -456,7 +479,7 @@ export class FfmpegRenderProvider implements RenderProvider {
         "-c:v",
         "copy",
         "-af",
-        `loudnorm=I=${LOUDNESS_TARGET_LUFS}:TP=${LOUDNESS_TRUE_PEAK_DB}:LRA=${LOUDNESS_RANGE}`,
+        loudnormFilter,
         "-c:a",
         "aac",
         "-b:a",
@@ -472,6 +495,70 @@ export class FfmpegRenderProvider implements RenderProvider {
       signal,
       "Mixing narration",
     );
+  }
+
+  /**
+   * First loudnorm pass: measure the narration and hand the numbers back so the
+   * second pass can apply an exact correction rather than an estimate.
+   *
+   * Returns null if the measurement cannot be parsed, in which case the caller
+   * falls back to single-pass — approximate loudness beats a failed render.
+   */
+  private async measureForLoudnorm(
+    filePath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<{
+    input_i: string;
+    input_tp: string;
+    input_lra: string;
+    input_thresh: string;
+    target_offset: string;
+  } | null> {
+    try {
+      const { stderr } = await run(
+        this.ffmpeg,
+        [
+          "-hide_banner",
+          "-i",
+          filePath,
+          "-af",
+          `loudnorm=I=${LOUDNESS_TARGET_LUFS}:TP=${LOUDNESS_TRUE_PEAK_DB}:LRA=${LOUDNESS_RANGE}:print_format=json`,
+          "-f",
+          "null",
+          "-",
+        ],
+        signal,
+        "Measuring narration",
+      );
+
+      // The JSON block is printed last, after ffmpeg's usual banner noise.
+      const start = stderr.lastIndexOf("{");
+      const end = stderr.lastIndexOf("}");
+      if (start === -1 || end === -1 || end < start) return null;
+
+      const parsed = JSON.parse(stderr.slice(start, end + 1)) as Record<string, string>;
+      const required = [
+        "input_i",
+        "input_tp",
+        "input_lra",
+        "input_thresh",
+        "target_offset",
+      ] as const;
+      for (const key of required) {
+        // "-inf" appears for silent input and would poison the second pass.
+        if (!parsed[key] || !Number.isFinite(Number.parseFloat(parsed[key]))) return null;
+      }
+
+      return {
+        input_i: parsed.input_i!,
+        input_tp: parsed.input_tp!,
+        input_lra: parsed.input_lra!,
+        input_thresh: parsed.input_thresh!,
+        target_offset: parsed.target_offset!,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

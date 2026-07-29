@@ -29,21 +29,43 @@ export function isQueueEnabled(): boolean {
 }
 
 /**
- * BullMQ requires `maxRetriesPerRequest: null` — its blocking commands would
- * otherwise be aborted by ioredis' own retry ceiling mid-wait.
+ * Producer and consumer need opposite failure behaviour, so they get different
+ * connections.
+ *
+ * A **worker** blocks on Redis waiting for jobs, so it must never give up:
+ * `maxRetriesPerRequest: null` is what BullMQ requires, otherwise ioredis
+ * aborts the blocking command mid-wait.
+ *
+ * A **producer** is inside a web request. With those same settings a dead Redis
+ * makes `queue.add()` retry forever rather than reject, which hangs the request
+ * that clicked "Start render" instead of reporting the problem. Bounded retries
+ * plus `enableOfflineQueue: false` make it fail fast and visibly.
  */
-export function createRedisConnection(): Redis {
+export function createRedisConnection(options: { blocking: boolean }): Redis {
   const url = getEnv().REDIS_URL;
   if (!url) throw new Error("REDIS_URL is not set.");
-  return new IORedis(url, { maxRetriesPerRequest: null });
+
+  return options.blocking
+    ? new IORedis(url, { maxRetriesPerRequest: null })
+    : new IORedis(url, {
+        maxRetriesPerRequest: 1,
+        enableOfflineQueue: false,
+        connectTimeout: 5_000,
+        // Without this an unreachable host logs an unhandled error event.
+        lazyConnect: false,
+        retryStrategy: (times) => (times > 2 ? null : Math.min(times * 200, 500)),
+      });
 }
+
+/** Ceiling on how long a web request may wait to hand off a job. */
+const ENQUEUE_TIMEOUT_MS = 8_000;
 
 let queue: Queue<RenderJobData> | null = null;
 
 export function getRenderQueue(): Queue<RenderJobData> | null {
   if (!isQueueEnabled()) return null;
   queue ??= new Queue<RenderJobData>(RENDER_QUEUE_NAME, {
-    connection: createRedisConnection(),
+    connection: createRedisConnection({ blocking: false }),
     defaultJobOptions: {
       attempts: RENDER_JOB_ATTEMPTS,
       // A failing encode usually fails instantly (bad input, missing binary),
@@ -64,8 +86,30 @@ export function getRenderQueue(): Queue<RenderJobData> | null {
 export async function enqueueRender(renderId: string): Promise<string | null> {
   const target = getRenderQueue();
   if (!target) return null;
-  const job = await target.add(RENDER_QUEUE_NAME, { renderId }, { jobId: renderId });
-  return job.id ?? null;
+
+  // Belt and braces alongside the connection settings: whatever ioredis does,
+  // a web request never waits longer than this to hand a job off.
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const job = await Promise.race([
+      target.add(RENDER_QUEUE_NAME, { renderId }, { jobId: renderId }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`the job queue did not respond within ${ENQUEUE_TIMEOUT_MS}ms`)),
+          ENQUEUE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    return job.id ?? null;
+  } catch (error) {
+    // Drop the cached queue so the next attempt builds a fresh connection.
+    // Without this, one outage at startup would poison every later render.
+    void closeRenderQueue().catch(() => {});
+    queue = null;
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function closeRenderQueue(): Promise<void> {

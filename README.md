@@ -519,6 +519,33 @@ One thing this slice re-taught: the narration panel's own copy contains the word
 Panels are now located by heading. That is the same ambiguity that bit
 `getByText("Draft")` two slices ago — body copy is not an identifier.
 
+### 2026-07-28 — What a real human voice changed
+
+The narration path had only ever been tested with a generated tone. A 33-second
+Spanish take from an actual narrator, recorded on a phone, exposed two things a
+constant tone cannot.
+
+**Loudness normalisation needed two passes.** Single-pass `loudnorm` works
+forward through the file and can only estimate; on a steady tone that estimate
+is perfect, on speech it landed 1.8 LU under target. Measuring first
+(`print_format=json`) and feeding the numbers back halved the error. The
+remainder is the true-peak ceiling doing its job — the output measures −14.8
+LUFS with peaks at −3.5 dBFS, inside the ±1 LU that EBU R128 and YouTube both
+work to, with her dynamics intact (LRA 4.3 LU).
+
+**A dead Redis hung the request instead of failing it.** BullMQ needs
+`maxRetriesPerRequest: null` so a *worker* never abandons its blocking wait —
+but the same setting on the *producer* means `queue.add()` retries forever
+rather than rejecting, so clicking "Start render" hung the web request. Producer
+and consumer now get opposite connections: bounded retries and
+`enableOfflineQueue: false` for the producer, unbounded for the worker, plus an
+8-second ceiling on the handoff and a cache reset so one outage at startup
+cannot poison every later render. Verified with Redis stopped: fails in 621 ms
+with a readable message.
+
+Both were found by testing with real material rather than a fixture. Neither was
+reachable from the test suite as written.
+
 ### Next — the rest of Milestone 2
 
 - **Subtitles** — SRT/VTT import, then faster-whisper timing locally.

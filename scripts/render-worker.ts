@@ -51,7 +51,7 @@ async function main() {
       console.log(`[${job.id}] rendering ${job.data.renderId} (attempt ${job.attemptsMade + 1})`);
       await runRenderJob(job.data.renderId);
     },
-    { connection: createRedisConnection(), concurrency: CONCURRENCY },
+    { connection: createRedisConnection({ blocking: true }), concurrency: CONCURRENCY },
   );
 
   worker.on("completed", (job) => console.log(`[${job.id}] done`));
