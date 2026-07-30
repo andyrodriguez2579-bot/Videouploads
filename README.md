@@ -675,6 +675,40 @@ Verified against the live APIs: Boazio's 1588 map of Drake's siege of Santo
 Domingo came back at 7174×6588, 5 MB, credited to the Bibliothèque nationale de
 France, licence recorded and left uncleared.
 
+### 2026-07-30 — Searching the national library from inside the app
+
+The episode's Sources tab can now search the **Biblioteca Nacional Pedro
+Henríquez Ureña**'s digital library and file a citation against the episode:
+author, publisher, place, year, series, extent and shelf reference, as the
+library's own cataloguers recorded them.
+
+**What this is not: an image source.** The catalogue runs DSpace 7, and probing
+it settled the question — search and metadata are public, but a bitstream
+request returns `401`. The scans cannot be downloaded, so this fills
+`research_sources` and nothing else. Every result links back to the library,
+because the reading still happens on their site.
+
+Two decisions worth recording:
+
+- **The catalogue's own `dc.identifier.citation` wins** when it exists. A
+  librarian formatted it, and it will be more correct than anything reassembled
+  from separate Dublin Core fields. The reassembled form is a fallback, not the
+  default.
+- **Imports are always `unverified`,** which is the entire point of that field.
+  A catalogue can tell you a book exists and roughly what it covers; it cannot
+  tell you it supports the sentence you wrote. `inferSourceType` is deliberately
+  conservative for the same reason — anything not plainly archival maps to
+  `secondary`, because calling a secondary work *primary* overstates the
+  evidence behind a claim, and that is the one error the field exists to
+  prevent.
+
+Verified end to end against the live catalogue: a search for "Drake Santo
+Domingo 1586" returns Rodríguez Demorizi's *Relaciones históricas de Santo
+Domingo* (1945, Editora Montalvo, `BNPHU/2970`), which collects documents on
+the 1586 invasion; importing it writes one `research_sources` row marked
+unverified, and importing it a second time returns the existing row rather than
+duplicating the citation.
+
 ### Next — the rest of Milestone 2
 
 - **Local narration generation** with Piper, as an alternative to recording.
