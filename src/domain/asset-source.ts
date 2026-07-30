@@ -90,6 +90,8 @@ interface WikimediaExtField {
 
 interface WikimediaImageInfo {
   url?: string;
+  /** Present only when the query asked for a scaled rendition. */
+  thumburl?: string;
   width?: number;
   height?: number;
   mime?: string;
@@ -109,12 +111,39 @@ export function parseWikimediaResponse(payload: unknown, sourceUrl: string): Rem
     throw new Error("Wikimedia returned no page for that file.");
   }
 
-  const info = (page as { imageinfo?: WikimediaImageInfo[] }).imageinfo?.[0];
-  if (!info?.url) {
+  const asset = mapWikimediaPage(page, sourceUrl);
+  if (!asset) {
     throw new Error(
       "That Commons page has no image file. Check the URL points at a File: page.",
     );
   }
+  return asset;
+}
+
+/**
+ * Drops a credit that carries no name.
+ *
+ * Commons' `Credit` field is often nothing but external links, which strip down
+ * to `[1] , [2]`. That is not a rights holder, and it would end up printed as
+ * an on-screen credit. The verbatim wording is still kept in the rights
+ * statement; this only guards the field meant to hold somebody's name.
+ */
+function nameOrNull(credit: string | null): string | null {
+  if (!credit) return null;
+  return /\p{L}/u.test(credit) ? credit : null;
+}
+
+/**
+ * Maps one page object from an `imageinfo` query.
+ *
+ * Returns null rather than throwing: a category listing should skip a member it
+ * cannot read instead of failing the whole page of results.
+ */
+function mapWikimediaPage(page: unknown, sourceUrl: string): RemoteAsset | null {
+  if (!page || typeof page !== "object") return null;
+
+  const info = (page as { imageinfo?: WikimediaImageInfo[] }).imageinfo?.[0];
+  if (!info?.url) return null;
 
   const meta = info.extmetadata ?? {};
   const field = (key: string) => stripHtml(meta[key]?.value);
@@ -131,7 +160,7 @@ export function parseWikimediaResponse(payload: unknown, sourceUrl: string): Rem
     archiveReference: null,
     provider: "wikimedia",
     // Commons credits the holding institution here; the artist is separate.
-    rightsHolder: field("Credit"),
+    rightsHolder: nameOrNull(field("Credit")),
     width: info.width ?? null,
     height: info.height ?? null,
     mimeType: info.mime ?? null,
@@ -205,6 +234,84 @@ export function parseLocResponse(payload: unknown, sourceUrl: string): RemoteAss
   };
 }
 
+/** One file in a Commons category, as offered for review before importing. */
+export interface CategoryMember extends RemoteAsset {
+  /** A scaled rendition for the picker; the import still fetches the full size. */
+  thumbnailUrl: string | null;
+}
+
+export interface CategoryListing {
+  files: CategoryMember[];
+  /** Sub-categories, so the browser can drill down rather than dead-end. */
+  subcategories: { title: string; url: string }[];
+  /** True when Commons has more files than were returned. */
+  truncated: boolean;
+}
+
+interface CategoryMemberEntry {
+  title?: string;
+}
+
+/**
+ * Reads a category listing: the files, plus the sub-categories under it.
+ *
+ * Sub-categories are listed but never followed. Commons categories nest deeply
+ * and drift off-subject as they go, so recursing would quietly pull in images
+ * nobody chose. Showing them lets the person decide where to look next.
+ */
+export function parseCategoryListing(payload: unknown): CategoryListing {
+  const query = (payload as {
+    query?: {
+      pages?: Record<string, unknown>;
+      categorymembers?: CategoryMemberEntry[];
+    };
+    continue?: unknown;
+  })?.query;
+
+  const files: CategoryMember[] = [];
+
+  for (const page of Object.values(query?.pages ?? {})) {
+    const title = (page as { title?: string }).title;
+    if (!title) continue;
+
+    const sourceUrl = commonsPageUrl(title);
+    const asset = mapWikimediaPage(page, sourceUrl);
+    if (!asset) continue;
+
+    const info = (page as { imageinfo?: WikimediaImageInfo[] }).imageinfo?.[0];
+    files.push({ ...asset, thumbnailUrl: info?.thumburl ?? null });
+  }
+
+  // Commons returns members in an arbitrary order; a stable one makes the
+  // picker predictable across reloads.
+  files.sort((a, b) => a.title.localeCompare(b.title));
+
+  const subcategories = (query?.categorymembers ?? [])
+    .map((entry) => entry.title)
+    .filter((title): title is string => Boolean(title))
+    .map((title) => ({ title: title.replace(/^Category:/, ""), url: commonsPageUrl(title) }));
+
+  return {
+    files,
+    subcategories,
+    truncated: Boolean((payload as { continue?: unknown })?.continue),
+  };
+}
+
+/**
+ * The human-facing Commons page for a title such as `File:Baní, 1890.jpg`.
+ *
+ * `:` and `,` are left as they are. Both forms resolve, but this is the
+ * canonical one Commons itself emits, and these URLs end up in citations a
+ * person reads.
+ */
+export function commonsPageUrl(title: string): string {
+  const encoded = encodeURIComponent(title.replace(/ /g, "_"))
+    .replace(/%3A/gi, ":")
+    .replace(/%2C/gi, ",");
+  return `https://commons.wikimedia.org/wiki/${encoded}`;
+}
+
 /**
  * Which archive a URL belongs to, or null when nothing recognises it.
  * Exported separately from fetching so routing can be tested on its own.
@@ -253,6 +360,38 @@ export function wikimediaFileTitle(rawUrl: string): string | null {
   if (url.hostname.endsWith("upload.wikimedia.org")) {
     const name = decodeURIComponent(url.pathname.split("/").pop() ?? "").replace(/_/g, " ");
     return name ? `File:${name}` : null;
+  }
+
+  return null;
+}
+
+/**
+ * The `Category:Name` a Commons URL refers to, or null if it is not one.
+ *
+ * Category pages are how Commons is actually browsed — a researcher lands on
+ * "Historical images of the Dominican Republic", not on forty separate file
+ * pages. Treating that URL as an error would push the tedious part of the work
+ * back onto the person.
+ */
+export function wikimediaCategoryTitle(rawUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+
+  const candidates = [
+    /\/wiki\/(.+)$/.exec(url.pathname)?.[1],
+    url.searchParams.get("title") ?? undefined,
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const decoded = decodeURIComponent(candidate).replace(/_/g, " ").trim();
+    // `Categoría`/`Categoria` appear on the Spanish-language interface.
+    const match = /^(category|categor[ií]a):(.+)$/i.exec(decoded);
+    if (match?.[2]?.trim()) return `Category:${match[2].trim()}`;
   }
 
   return null;

@@ -2,6 +2,7 @@ import { Badge, EmptyState, PageHeader } from "@/components/ui";
 import { ASSET_KINDS, LICENSE_TYPE_LABELS } from "@/domain/types";
 import { listAssetLibrary, listEpisodes, listLicenses } from "@/server/episodes";
 
+import { CategoryBrowser } from "./category-browser";
 import { ImportForm, LicenseForm, UploadForm } from "./forms";
 
 export const dynamic = "force-dynamic";
@@ -237,6 +238,12 @@ export default async function AssetsPage({
 
       <div className="mb-6">
         <ImportForm
+          episodes={episodeRows.map(({ episode }) => ({ id: episode.id, title: episode.title }))}
+        />
+      </div>
+
+      <div className="mb-6">
+        <CategoryBrowser
           episodes={episodeRows.map(({ episode }) => ({ id: episode.id, title: episode.title }))}
         />
       </div>

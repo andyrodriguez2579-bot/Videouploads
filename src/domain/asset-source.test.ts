@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   classifySourceUrl,
   inferLicenseType,
+  parseCategoryListing,
   parseLocResponse,
   parseWikimediaResponse,
   stripHtml,
+  wikimediaCategoryTitle,
   wikimediaFileTitle,
 } from "./asset-source";
 
@@ -224,5 +226,188 @@ describe("parseLocResponse", () => {
 
   it("explains itself when an item has no downloadable image", () => {
     expect(() => parseLocResponse({ item: { title: "X" } }, "u")).toThrow(/no downloadable image/i);
+  });
+});
+
+/**
+ * Recorded from Commons' own API for
+ * `Category:Historical_images_of_the_Dominican_Republic` — the category the
+ * series is actually being sourced from. Trimmed to two members and their
+ * sub-categories, but the field shapes are verbatim, hidden markup included.
+ */
+const CATEGORY_RESPONSE = {
+  continue: { gcmcontinue: "file|…", continue: "gcmcontinue||" },
+  query: {
+    pages: {
+      "9990": {
+        title: "File:Dominican Republic baseball history.jpg",
+        imageinfo: [
+          {
+            url: "https://upload.wikimedia.org/wikipedia/commons/8/83/Dominican_Republic_baseball_history.jpg",
+            thumburl:
+              "https://upload.wikimedia.org/wikipedia/commons/thumb/8/83/Dominican_Republic_baseball_history.jpg/330px-Dominican_Republic_baseball_history.jpg",
+            width: 1600,
+            height: 2648,
+            mime: "image/jpeg",
+            extmetadata: {
+              LicenseShortName: { value: "Public domain" },
+              UsageTerms: { value: "Public domain" },
+              Artist: {
+                value:
+                  '<bdi><a href="https://en.wikipedia.org/wiki/en:Associated_Press" class="extiw" title="w:en:Associated Press"><span title="multinational nonprofit news agency">Associated Press</span></a></bdi>',
+              },
+              DateTimeOriginal: { value: "1948-03-06" },
+              Credit: {
+                value:
+                  '<a rel="nofollow" class="external autonumber" href="https://www.newspapers.com/image/1233253631">[1]</a>',
+              },
+              AttributionRequired: { value: "false" },
+            },
+          },
+        ],
+      },
+      "1111": {
+        title: "File:Baní, 1890.jpg",
+        imageinfo: [
+          {
+            url: "https://upload.wikimedia.org/wikipedia/commons/5/5d/Ban%C3%AD%2C_1890.jpg",
+            thumburl:
+              "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5d/Ban%C3%AD%2C_1890.jpg/330px-Ban%C3%AD%2C_1890.jpg",
+            width: 2208,
+            height: 1492,
+            mime: "image/jpeg",
+            extmetadata: {
+              LicenseShortName: { value: "CC BY-SA 4.0" },
+              UsageTerms: { value: "Creative Commons Attribution-Share Alike 4.0" },
+              Artist: {
+                value:
+                  '<a href="//commons.wikimedia.org/w/index.php?title=User:Ronny_Medina&amp;action=edit&amp;redlink=1" class="new">Ronny Medina</a>',
+              },
+              DateTimeOriginal: { value: "2018-12-01 20:26:28" },
+              Credit: { value: '<span class="int-own-work" lang="en">Own work</span>' },
+              AttributionRequired: { value: "true" },
+            },
+          },
+        ],
+      },
+    },
+    categorymembers: [
+      { title: "Category:Photographs of the Dominican Republic by century" },
+      { title: "Category:Historical images of Fortaleza Ozama" },
+    ],
+  },
+};
+
+describe("wikimediaCategoryTitle", () => {
+  it("reads a category off a Commons URL", () => {
+    expect(
+      wikimediaCategoryTitle(
+        "https://commons.wikimedia.org/wiki/Category:Historical_images_of_the_Dominican_Republic",
+      ),
+    ).toBe("Category:Historical images of the Dominican Republic");
+  });
+
+  it("accepts the Spanish interface's spelling and the ?title= form", () => {
+    expect(
+      wikimediaCategoryTitle("https://commons.wikimedia.org/wiki/Categoría:Santo_Domingo"),
+    ).toBe("Category:Santo Domingo");
+    expect(
+      wikimediaCategoryTitle("https://commons.wikimedia.org/w/index.php?title=Category:Baní"),
+    ).toBe("Category:Baní");
+  });
+
+  it("returns null for anything that is not a category", () => {
+    expect(wikimediaCategoryTitle("https://commons.wikimedia.org/wiki/File:Baní,_1890.jpg")).toBeNull();
+    expect(wikimediaCategoryTitle("https://www.loc.gov/item/2017801069/")).toBeNull();
+    expect(wikimediaCategoryTitle("not a url")).toBeNull();
+    // A bare "Category:" with no name is not a category page.
+    expect(wikimediaCategoryTitle("https://commons.wikimedia.org/wiki/Category:")).toBeNull();
+  });
+});
+
+describe("parseCategoryListing", () => {
+  it("maps every file with its licence, size and thumbnail", () => {
+    const listing = parseCategoryListing(CATEGORY_RESPONSE);
+
+    expect(listing.files).toHaveLength(2);
+    const bani = listing.files.find((f) => f.title.startsWith("Baní"))!;
+    expect(bani.imageUrl).toBe(
+      "https://upload.wikimedia.org/wikipedia/commons/5/5d/Ban%C3%AD%2C_1890.jpg",
+    );
+    expect(bani.thumbnailUrl).toContain("330px-");
+    expect(bani.licenseName).toBe("CC BY-SA 4.0");
+    expect(bani.width).toBe(2208);
+    expect(bani.attributionRequired).toBe(true);
+  });
+
+  it("strips the markup Commons wraps around creators and credits", () => {
+    const listing = parseCategoryListing(CATEGORY_RESPONSE);
+    const ap = listing.files.find((f) => f.title.includes("baseball"))!;
+
+    expect(ap.creator).toBe("Associated Press");
+    // Commons' credit here is only external links; "[1]" is not a rights
+    // holder, and it would otherwise be printed as an on-screen credit.
+    expect(ap.rightsHolder).toBeNull();
+    expect(ap.rightsStatement).toBe("Public domain");
+    expect(ap.date).toBe("1948-03-06");
+  });
+
+  it("points each file at its Commons page, not the raw upload URL", () => {
+    // The licence record cites the page a person can read the rights on.
+    const listing = parseCategoryListing(CATEGORY_RESPONSE);
+    const bani = listing.files.find((f) => f.title.startsWith("Baní"))!;
+
+    expect(bani.sourceUrl).toBe(
+      "https://commons.wikimedia.org/wiki/File:Ban%C3%AD,_1890.jpg",
+    );
+    // And the importer must be able to read that title back out of it.
+    expect(wikimediaFileTitle(bani.sourceUrl)).toBe("File:Baní, 1890.jpg");
+  });
+
+  it("orders files by title so the picker does not reshuffle", () => {
+    expect(parseCategoryListing(CATEGORY_RESPONSE).files.map((f) => f.title)).toEqual([
+      "Baní, 1890",
+      "Dominican Republic baseball history",
+    ]);
+  });
+
+  it("lists sub-categories without following them", () => {
+    const listing = parseCategoryListing(CATEGORY_RESPONSE);
+
+    expect(listing.subcategories).toEqual([
+      {
+        title: "Photographs of the Dominican Republic by century",
+        url: "https://commons.wikimedia.org/wiki/Category:Photographs_of_the_Dominican_Republic_by_century",
+      },
+      {
+        title: "Historical images of Fortaleza Ozama",
+        url: "https://commons.wikimedia.org/wiki/Category:Historical_images_of_Fortaleza_Ozama",
+      },
+    ]);
+  });
+
+  it("reports that Commons had more files than it returned", () => {
+    expect(parseCategoryListing(CATEGORY_RESPONSE).truncated).toBe(true);
+    expect(parseCategoryListing({ query: { pages: {} } }).truncated).toBe(false);
+  });
+
+  it("skips a member with no image rather than failing the whole listing", () => {
+    const withBadMember = {
+      query: {
+        pages: {
+          ...CATEGORY_RESPONSE.query.pages,
+          "7777": { title: "File:Deleted.jpg" },
+        },
+      },
+    };
+
+    expect(parseCategoryListing(withBadMember).files).toHaveLength(2);
+  });
+
+  it("returns empty lists for a category holding nothing", () => {
+    const listing = parseCategoryListing({ query: {} });
+
+    expect(listing.files).toEqual([]);
+    expect(listing.subcategories).toEqual([]);
   });
 });

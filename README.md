@@ -709,6 +709,41 @@ the 1586 invasion; importing it writes one `research_sources` row marked
 unverified, and importing it a second time returns the existing row rather than
 duplicating the citation.
 
+### 2026-07-30 — Browsing a Commons category
+
+Pasting a Commons **category** page now lists what is in it — thumbnail,
+creator, date, dimensions and licence for each file — and imports the ticked
+ones. Each goes through the same path as a single-URL import, licence record
+and all.
+
+This closes a real gap: a category page is how Commons is actually searched.
+You land on "Historical images of the Dominican Republic", not on forty
+separate file pages, and the importer used to reject that URL outright. It now
+also says where a category URL belongs when one is pasted into the single-file
+box, instead of only refusing it.
+
+Two decisions worth recording:
+
+- **Sub-categories are listed but never followed.** Commons categories nest
+  deeply and drift off-subject as they go, so recursing would quietly import
+  images nobody chose. They are shown as links so the person decides where to
+  look next.
+- **Imports run one at a time.** These are multi-megabyte archive masters, and
+  firing a dozen downloads at once would spike memory and hammer an API whose
+  policy asks callers not to. One failure does not abandon the rest — the
+  summary says which were skipped and why.
+
+A smaller fix fell out of testing at scale: Commons' `Credit` field is often
+nothing but external links, which strip down to `[1] , [2]`. That is not a
+rights holder, and it would have been printed as an on-screen credit. A credit
+containing no letters is now dropped, with the archive's verbatim wording still
+kept in the rights statement.
+
+Verified against the live API and in a browser: the Dominican Republic category
+lists 9 files across CC BY 2.0, CC BY-SA 4.0 and public domain, offers its 3
+sub-categories as links, and importing one downloads the full 1600×2648 master
+with an **uncleared** licence record.
+
 ### Next — the rest of Milestone 2
 
 - **Local narration generation** with Piper, as an alternative to recording.

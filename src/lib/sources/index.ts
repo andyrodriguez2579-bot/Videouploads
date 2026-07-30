@@ -2,9 +2,12 @@ import "server-only";
 
 import {
   classifySourceUrl,
+  parseCategoryListing,
   parseLocResponse,
   parseWikimediaResponse,
+  wikimediaCategoryTitle,
   wikimediaFileTitle,
+  type CategoryListing,
   type RemoteAsset,
 } from "@/domain/asset-source";
 import { getEnv } from "@/lib/env";
@@ -57,6 +60,14 @@ export async function resolveAssetUrl(rawUrl: string): Promise<RemoteAsset> {
   if (kind === "wikimedia") {
     const title = wikimediaFileTitle(rawUrl);
     if (!title) {
+      // A category is a reasonable thing to paste, so say where it goes rather
+      // than only that this is the wrong box for it.
+      if (wikimediaCategoryTitle(rawUrl)) {
+        throw new Error(
+          "That is a Commons category, not a single file. Paste it into " +
+            "“Browse a Commons category” to pick images from it.",
+        );
+      }
       throw new Error("That Wikimedia URL does not point at a File: page.");
     }
     const api =
@@ -92,6 +103,41 @@ export async function resolveAssetUrl(rawUrl: string): Promise<RemoteAsset> {
     mimeType: null,
     attributionRequired: true,
   };
+}
+
+/** How many files one category request returns. Commons pages beyond this. */
+const CATEGORY_PAGE_SIZE = 50;
+
+/**
+ * Lists the files in a Commons category, with metadata and thumbnails.
+ *
+ * One request: a `categorymembers` generator feeds `imageinfo`, and a parallel
+ * `list=categorymembers` picks up the sub-categories. Doing it as separate
+ * lookups per file would be dozens of round trips against an API whose policy
+ * asks callers not to hammer it.
+ */
+export async function listWikimediaCategory(rawUrl: string): Promise<CategoryListing> {
+  const title = wikimediaCategoryTitle(rawUrl);
+  if (!title) throw new Error("That Wikimedia URL does not point at a Category: page.");
+
+  const api = new URL("https://commons.wikimedia.org/w/api.php");
+  api.searchParams.set("action", "query");
+  api.searchParams.set("format", "json");
+  // Files in the category, expanded to full image metadata.
+  api.searchParams.set("generator", "categorymembers");
+  api.searchParams.set("gcmtitle", title);
+  api.searchParams.set("gcmtype", "file");
+  api.searchParams.set("gcmlimit", String(CATEGORY_PAGE_SIZE));
+  api.searchParams.set("prop", "imageinfo");
+  api.searchParams.set("iiprop", "url|size|mime|extmetadata");
+  api.searchParams.set("iiurlwidth", "320");
+  // Sub-categories, listed but not followed.
+  api.searchParams.set("list", "categorymembers");
+  api.searchParams.set("cmtitle", title);
+  api.searchParams.set("cmtype", "subcat");
+  api.searchParams.set("cmlimit", "50");
+
+  return parseCategoryListing(await fetchJson(api.toString()));
 }
 
 export interface DownloadedImage {
