@@ -9,6 +9,7 @@ import {
   episodes,
   episodeVersions,
   mediaAssets,
+  renderJobs,
   renders,
   researchSources,
   sceneAssets,
@@ -177,10 +178,22 @@ export async function listCaptions(episodeId: string) {
     .orderBy(desc(captions.createdAt));
 }
 
+/**
+ * Renders with their job progress attached. The job is left-joined because a
+ * render row is created before its job, and a render whose job row was pruned
+ * should still be listed rather than vanishing.
+ */
 export async function listRenders(episodeId: string) {
   return db
-    .select()
+    .select({
+      render: renders,
+      progress: renderJobs.progress,
+      stage: renderJobs.stage,
+      jobStatus: renderJobs.status,
+      jobError: renderJobs.errorMessage,
+    })
     .from(renders)
+    .leftJoin(renderJobs, eq(renderJobs.renderId, renders.id))
     .where(eq(renders.episodeId, episodeId))
     .orderBy(desc(renders.createdAt));
 }

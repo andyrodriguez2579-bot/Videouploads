@@ -1,0 +1,784 @@
+/**
+ * FFmpeg render driver.
+ *
+ * Each scene becomes a self-contained segment — a still (or a plain card when
+ * no still is linked) with the heading and caption drawn over it — and the
+ * segments are concatenated without re-encoding.
+ *
+ * Encoding segment-by-segment rather than as one enormous filter graph is the
+ * whole reason progress reporting and retries are possible: a 40-scene episode
+ * reports 40 steps, and a failure names the scene that caused it instead of
+ * dumping an unreadable graph. It also keeps peak memory flat regardless of
+ * episode length.
+ *
+ * Every segment is encoded with identical parameters, which is what lets the
+ * concat demuxer stitch them with `-c copy`.
+ */
+import { spawn } from "node:child_process";
+import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import type { RenderSegment } from "@/domain/render";
+import { getEnv } from "@/lib/env";
+
+import type { RenderProvider, RenderRequest, RenderResult } from "./types";
+
+/** Ink-dark background, matching the app's palette rather than pure black. */
+const CARD_COLOUR = "0x14181d";
+const AUDIO_SAMPLE_RATE = 48000;
+
+/**
+ * EBU R128 target. YouTube normalises uploads to roughly -14 LUFS, so
+ * delivering at -14 means the platform leaves the mix alone instead of pulling
+ * it down and flattening the dynamics someone chose. -1.5 dBTP of headroom
+ * keeps lossy transcodes from clipping on the peaks.
+ */
+const LOUDNESS_TARGET_LUFS = -14;
+const LOUDNESS_TRUE_PEAK_DB = -1.5;
+const LOUDNESS_RANGE = 11;
+
+/**
+ * Fonts are probed rather than configured: drawtext needs a real file, and a
+ * missing one fails the render at the last step. Serif first — it matches the
+ * documentary styling the app uses for headings.
+ */
+const HEADING_FONT_CANDIDATES = [
+  "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+  "/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf",
+  "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf",
+];
+const CAPTION_FONT_CANDIDATES = [
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+  "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+  "/System/Library/Fonts/Supplemental/Arial.ttf",
+];
+
+async function firstExisting(candidates: string[]): Promise<string | null> {
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Try the next one.
+    }
+  }
+  return null;
+}
+
+/**
+ * The virtual canvas ffmpeg gives an SRT when it converts one to ASS. Sizes in
+ * `force_style` are in *these* units, not pixels — libass scales the whole
+ * script to the frame afterwards.
+ *
+ * Getting this wrong is not subtle: treating the numbers as pixels on a 1080p
+ * frame magnifies everything 3.75x, which fills the screen with one subtitle.
+ */
+const ASS_SCRIPT_HEIGHT = 288;
+
+/**
+ * libass styling for burned-in captions.
+ *
+ * Because the units are script-relative, one set of numbers is correct for both
+ * a 16:9 documentary and a 9:16 short — libass does the scaling.
+ *
+ * Opaque box rather than a drop shadow: archival stills are unpredictable, and
+ * a shadow that works over a dark photograph disappears over a bright one.
+ */
+function subtitleStyle(): string {
+  return [
+    "FontName=DejaVu Sans",
+    `FontSize=${Math.round(ASS_SCRIPT_HEIGHT / 18)}`,
+    "PrimaryColour=&H00FFFFFF",
+    // With BorderStyle=3 libass fills the box from OutlineColour, sized by
+    // Outline — not from BackColour, which only shadows. Outline=0 here means
+    // no box at all, which is invisible over a bright archival still.
+    "OutlineColour=&H90000000",
+    "BorderStyle=3",
+    "Outline=3",
+    "Shadow=0",
+    // Bottom-centred, and low enough to clear the lower-third heading.
+    "Alignment=2",
+    `MarginV=${Math.round(ASS_SCRIPT_HEIGHT / 12)}`,
+  ].join(",");
+}
+
+/**
+ * Escapes a path for use *inside* a filter argument. ffmpeg parses `:` as an
+ * option separator and `'` as quoting even after shell argv splitting, so a
+ * path containing either would silently corrupt the filter graph.
+ */
+function escapeFilterPath(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+}
+
+interface RunResult {
+  stderr: string;
+}
+
+function run(
+  bin: string,
+  args: string[],
+  signal: AbortSignal | undefined,
+  label: string,
+): Promise<RunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    let stdout = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+      // ffmpeg is famously chatty; keep only the tail so a long render cannot
+      // grow this string without bound.
+      if (stderr.length > 20_000) stderr = stderr.slice(-10_000);
+    });
+
+    const onAbort = () => child.kill("SIGKILL");
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    child.on("error", (error) => {
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error(`${label}: could not start ${bin} (${error.message})`));
+    });
+
+    child.on("close", (code) => {
+      signal?.removeEventListener("abort", onAbort);
+      if (signal?.aborted) {
+        reject(new Error(`${label}: cancelled`));
+        return;
+      }
+      if (code === 0) {
+        resolve({ stderr: stdout || stderr });
+        return;
+      }
+      const tail = stderr.trim().split("\n").slice(-6).join("\n");
+      reject(new Error(`${label}: ffmpeg exited ${code}\n${tail}`));
+    });
+  });
+}
+
+export class FfmpegRenderProvider implements RenderProvider {
+  readonly name = "ffmpeg";
+
+  private get ffmpeg(): string {
+    return getEnv().FFMPEG_PATH;
+  }
+
+  private get ffprobe(): string {
+    return getEnv().FFPROBE_PATH;
+  }
+
+  async preflight(): Promise<void> {
+    try {
+      await run(this.ffmpeg, ["-hide_banner", "-version"], undefined, "preflight");
+    } catch {
+      throw new Error(
+        `FFmpeg is not available at "${this.ffmpeg}". Install it, or set FFMPEG_PATH ` +
+          `to its location. On Debian/Ubuntu: apt-get install ffmpeg.`,
+      );
+    }
+    if (!(await firstExisting(HEADING_FONT_CANDIDATES))) {
+      throw new Error(
+        "No usable font was found for on-screen text. Install a font package " +
+          "(Debian/Ubuntu: apt-get install fonts-dejavu-core).",
+      );
+    }
+  }
+
+  async render(request: RenderRequest): Promise<RenderResult> {
+    await this.preflight();
+
+    const { plan, outputPath, resolveAsset, onProgress, signal } = request;
+    if (plan.segments.length === 0) {
+      throw new Error("Nothing to render: the plan has no segments.");
+    }
+
+    const headingFont = (await firstExisting(HEADING_FONT_CANDIDATES))!;
+    const captionFont = (await firstExisting(CAPTION_FONT_CANDIDATES)) ?? headingFont;
+
+    const workDir = await mkdtemp(path.join(tmpdir(), "historia-render-"));
+    const logs: string[] = [];
+
+    try {
+      const segmentPaths: string[] = [];
+
+      for (const [index, segment] of plan.segments.entries()) {
+        if (signal?.aborted) throw new Error("Render cancelled.");
+
+        await onProgress?.({
+          completed: index,
+          total: plan.segments.length + 1,
+          stage: `Rendering scene ${index + 1} of ${plan.segments.length}`,
+        });
+
+        const segmentPath = path.join(workDir, `segment-${String(index).padStart(4, "0")}.mp4`);
+        const background = segment.backgroundKey ? await resolveAsset(segment.backgroundKey) : null;
+        const sceneNarration = segment.narrationKey
+          ? await resolveAsset(segment.narrationKey)
+          : null;
+
+        const args = await this.segmentArgs({
+          segment,
+          plan,
+          workDir,
+          index,
+          background,
+          narration: sceneNarration,
+          headingFont,
+          captionFont,
+          outputPath: segmentPath,
+        });
+
+        const { stderr } = await run(
+          this.ffmpeg,
+          args,
+          signal,
+          `Scene ${index + 1} ("${segment.heading}")`,
+        );
+        logs.push(stderr.trim().split("\n").slice(-3).join("\n"));
+        segmentPaths.push(segmentPath);
+      }
+
+      await onProgress?.({
+        completed: plan.segments.length,
+        total: plan.segments.length + 1,
+        stage: "Joining scenes",
+      });
+
+      await mkdir(path.dirname(outputPath), { recursive: true });
+
+      // With narration the concat is an intermediate: the mix and the loudness
+      // pass happen once over the whole programme, which is the only level at
+      // which integrated loudness means anything.
+      //
+      // Two ways narration can arrive. One recording under the whole episode is
+      // mixed in here. Per-scene narration is already inside the segments, so
+      // it only needs normalising — but either way the loudness pass runs once,
+      // over the finished programme, which is the only level at which
+      // integrated loudness means anything.
+      const perSceneNarration = plan.segments.some((segment) => segment.narrationKey !== null);
+      const episodeNarration = perSceneNarration ? null : request.narrationPath ?? null;
+      const needsAudioPass = Boolean(episodeNarration) || perSceneNarration;
+
+      // Subtitles are burned during the join, not per segment: cue timings are
+      // relative to the whole film, and a segment knows nothing about where it
+      // sits in it.
+      const subtitlePath = request.subtitleSrt
+        ? path.join(workDir, "captions.srt")
+        : null;
+      if (subtitlePath) await writeFile(subtitlePath, request.subtitleSrt!, "utf8");
+
+      const joinedPath = needsAudioPass ? path.join(workDir, "joined.mp4") : outputPath;
+      await this.concat(segmentPaths, joinedPath, workDir, signal, subtitlePath);
+
+      let loudnessLufs: number | null = null;
+      if (needsAudioPass) {
+        await onProgress?.({
+          completed: plan.segments.length,
+          total: plan.segments.length + 1,
+          stage: episodeNarration ? "Mixing narration" : "Normalising audio",
+        });
+        if (episodeNarration) {
+          await this.mixNarration(joinedPath, episodeNarration, outputPath, signal);
+        } else {
+          await this.normaliseAudio(joinedPath, outputPath, signal);
+        }
+        loudnessLufs = await this.measureLoudness(outputPath, signal);
+      }
+
+      const [{ size }, durationSeconds] = await Promise.all([
+        stat(outputPath),
+        this.probeDuration(outputPath, signal),
+      ]);
+
+      await onProgress?.({
+        completed: plan.segments.length + 1,
+        total: plan.segments.length + 1,
+        stage: "Complete",
+      });
+
+      return {
+        outputPath,
+        byteSize: size,
+        durationSeconds,
+        width: plan.width,
+        height: plan.height,
+        mimeType: "video/mp4",
+        loudnessLufs,
+        log: logs.join("\n").slice(-4000),
+      };
+    } finally {
+      await rm(workDir, { recursive: true, force: true }).catch(() => {
+        // A leftover temp directory is not worth failing a good render over.
+      });
+    }
+  }
+
+  /**
+   * Builds the argv for one segment. Text is passed via `textfile=` rather than
+   * inline: headings legitimately contain colons, apostrophes and commas, all
+   * of which are filter-graph metacharacters that would otherwise need brittle
+   * multi-level escaping.
+   */
+  private async segmentArgs(input: {
+    segment: RenderSegment;
+    plan: RenderRequest["plan"];
+    workDir: string;
+    index: number;
+    background: string | null;
+    narration: string | null;
+    headingFont: string;
+    captionFont: string;
+    outputPath: string;
+  }): Promise<string[]> {
+    const { segment, plan, workDir, index, background, headingFont, captionFont } = input;
+    const { width, height, fps } = plan;
+    const duration = segment.durationSeconds.toFixed(3);
+
+    const args: string[] = ["-hide_banner", "-loglevel", "error", "-y"];
+
+    if (background) {
+      // A still: hold one frame for the scene's duration.
+      args.push("-loop", "1", "-t", duration, "-i", background);
+    } else {
+      args.push("-f", "lavfi", "-i", `color=c=${CARD_COLOUR}:s=${width}x${height}:r=${fps}`);
+    }
+
+    // Every segment carries an audio track, silent or not, because the concat
+    // demuxer requires an identical stream layout throughout. A scene with its
+    // own narration gets that recording; the rest get silence.
+    if (input.narration) {
+      args.push("-i", input.narration);
+    } else {
+      args.push(
+        "-f",
+        "lavfi",
+        "-i",
+        `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SAMPLE_RATE}`,
+      );
+    }
+
+    const filters: string[] = [];
+    if (background) {
+      // Cover the frame without distorting: upscale to fill, then crop the
+      // overflow. Letterboxing a documentary still looks like a mistake.
+      filters.push(
+        `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+        `crop=${width}:${height}`,
+        // Darken so drawn text stays legible over a bright archival scan.
+        "eq=brightness=-0.06",
+      );
+    }
+    filters.push(`format=yuv420p`);
+
+    const headingSize = Math.round(height / 16);
+    const captionSize = Math.round(height / 30);
+    const hasCaption = Boolean(segment.caption?.trim());
+
+    const headingFile = path.join(workDir, `heading-${index}.txt`);
+    await writeFile(headingFile, segment.heading, "utf8");
+
+    // Heading sits on the lower third; caption below it when present.
+    const headingY = hasCaption ? `h*0.70-text_h` : `h*0.76-text_h/2`;
+    filters.push(
+      [
+        `drawtext=fontfile='${escapeFilterPath(headingFont)}'`,
+        `textfile='${escapeFilterPath(headingFile)}'`,
+        `fontcolor=white`,
+        `fontsize=${headingSize}`,
+        `x=(w-text_w)/2`,
+        `y=${headingY}`,
+        `box=1`,
+        `boxcolor=black@0.45`,
+        `boxborderw=${Math.round(headingSize * 0.4)}`,
+        `line_spacing=${Math.round(headingSize * 0.2)}`,
+      ].join(":"),
+    );
+
+    if (hasCaption) {
+      const captionFile = path.join(workDir, `caption-${index}.txt`);
+      await writeFile(captionFile, wrapText(segment.caption!.trim(), 52), "utf8");
+      filters.push(
+        [
+          `drawtext=fontfile='${escapeFilterPath(captionFont)}'`,
+          `textfile='${escapeFilterPath(captionFile)}'`,
+          `fontcolor=white@0.92`,
+          `fontsize=${captionSize}`,
+          `x=(w-text_w)/2`,
+          `y=h*0.74`,
+          `box=1`,
+          `boxcolor=black@0.45`,
+          `boxborderw=${Math.round(captionSize * 0.5)}`,
+          `line_spacing=${Math.round(captionSize * 0.25)}`,
+        ].join(":"),
+      );
+    }
+
+    args.push(
+      "-vf",
+      filters.join(","),
+      // apad holds silence after the line ends so the segment runs its full
+      // length; without it -shortest would cut the picture to the audio.
+      ...(input.narration ? ["-af", "apad"] : []),
+      "-t",
+      duration,
+      "-r",
+      String(fps),
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "20",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-ar",
+      String(AUDIO_SAMPLE_RATE),
+      "-ac",
+      "2",
+      "-shortest",
+      "-movflags",
+      "+faststart",
+      input.outputPath,
+    );
+
+    return args;
+  }
+
+  private async concat(
+    segmentPaths: string[],
+    outputPath: string,
+    workDir: string,
+    signal: AbortSignal | undefined,
+    subtitlePath: string | null = null,
+  ): Promise<void> {
+    const listPath = path.join(workDir, "segments.txt");
+    // The concat demuxer's own quoting: single quotes are escaped as '\''.
+    const list = segmentPaths
+      .map((segmentPath) => `file '${segmentPath.replace(/'/g, "'\\''")}'`)
+      .join("\n");
+    await writeFile(listPath, `${list}\n`, "utf8");
+
+    await run(
+      this.ffmpeg,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        listPath,
+        // Stream-copy unless subtitles have to be drawn in, which needs pixels.
+        ...(subtitlePath
+          ? [
+              "-vf",
+              `subtitles='${escapeFilterPath(subtitlePath)}':force_style='${subtitleStyle()}'`,
+              "-c:v",
+              "libx264",
+              "-preset",
+              "veryfast",
+              "-crf",
+              "20",
+              "-pix_fmt",
+              "yuv420p",
+              "-c:a",
+              "copy",
+            ]
+          : ["-c", "copy"]),
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ],
+      signal,
+      subtitlePath ? "Joining scenes and burning in subtitles" : "Joining scenes",
+    );
+  }
+
+  /**
+   * Lays the narration under the finished picture and normalises the programme
+   * to the EBU R128 target.
+   *
+   * The video is stream-copied — it was encoded once already and re-encoding it
+   * to attach audio would cost quality for nothing. `-shortest` is deliberately
+   * absent: the plan has already been stretched so the picture covers the
+   * narration, and using it here would silently clip the last words instead.
+   */
+  private async mixNarration(
+    videoPath: string,
+    narrationPath: string,
+    outputPath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    // Two passes, not one. Single-pass loudnorm works forward through the file
+    // and can only estimate, which on real speech lands a couple of LU off the
+    // target — a constant tone hides this, a human voice does not. Measuring
+    // first and feeding the numbers back lets it apply a known correction.
+    const measured = await this.measureForLoudnorm(narrationPath, signal);
+    const loudnormFilter = [
+      `loudnorm=I=${LOUDNESS_TARGET_LUFS}`,
+      `TP=${LOUDNESS_TRUE_PEAK_DB}`,
+      `LRA=${LOUDNESS_RANGE}`,
+      ...(measured
+        ? [
+            `measured_I=${measured.input_i}`,
+            `measured_TP=${measured.input_tp}`,
+            `measured_LRA=${measured.input_lra}`,
+            `measured_thresh=${measured.input_thresh}`,
+            `offset=${measured.target_offset}`,
+            // Linear gain preserves the performance; dynamic mode would ride
+            // the level and flatten a deliberate delivery.
+            "linear=true",
+          ]
+        : []),
+    ].join(":");
+
+    await run(
+      this.ffmpeg,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        videoPath,
+        "-i",
+        narrationPath,
+        // Take picture from the first input and sound from the second, dropping
+        // the silent track the segments carry.
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-af",
+        loudnormFilter,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        String(AUDIO_SAMPLE_RATE),
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ],
+      signal,
+      "Mixing narration",
+    );
+  }
+
+  /**
+   * Normalises audio that is already inside the film — the per-scene case,
+   * where each segment carried its own line through the concat.
+   *
+   * Same two-pass approach as the mix, and the video is stream-copied: it was
+   * encoded once already and re-encoding it to touch the audio would cost
+   * quality for nothing.
+   */
+  private async normaliseAudio(
+    inputPath: string,
+    outputPath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const measured = await this.measureForLoudnorm(inputPath, signal);
+    const loudnormFilter = [
+      `loudnorm=I=${LOUDNESS_TARGET_LUFS}`,
+      `TP=${LOUDNESS_TRUE_PEAK_DB}`,
+      `LRA=${LOUDNESS_RANGE}`,
+      ...(measured
+        ? [
+            `measured_I=${measured.input_i}`,
+            `measured_TP=${measured.input_tp}`,
+            `measured_LRA=${measured.input_lra}`,
+            `measured_thresh=${measured.input_thresh}`,
+            `offset=${measured.target_offset}`,
+            "linear=true",
+          ]
+        : []),
+    ].join(":");
+
+    await run(
+      this.ffmpeg,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        inputPath,
+        "-c:v",
+        "copy",
+        "-af",
+        loudnormFilter,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        String(AUDIO_SAMPLE_RATE),
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        outputPath,
+      ],
+      signal,
+      "Normalising audio",
+    );
+  }
+
+  /**
+   * First loudnorm pass: measure the narration and hand the numbers back so the
+   * second pass can apply an exact correction rather than an estimate.
+   *
+   * Returns null if the measurement cannot be parsed, in which case the caller
+   * falls back to single-pass — approximate loudness beats a failed render.
+   */
+  private async measureForLoudnorm(
+    filePath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<{
+    input_i: string;
+    input_tp: string;
+    input_lra: string;
+    input_thresh: string;
+    target_offset: string;
+  } | null> {
+    try {
+      const { stderr } = await run(
+        this.ffmpeg,
+        [
+          "-hide_banner",
+          "-i",
+          filePath,
+          "-af",
+          `loudnorm=I=${LOUDNESS_TARGET_LUFS}:TP=${LOUDNESS_TRUE_PEAK_DB}:LRA=${LOUDNESS_RANGE}:print_format=json`,
+          "-f",
+          "null",
+          "-",
+        ],
+        signal,
+        "Measuring narration",
+      );
+
+      // The JSON block is printed last, after ffmpeg's usual banner noise.
+      const start = stderr.lastIndexOf("{");
+      const end = stderr.lastIndexOf("}");
+      if (start === -1 || end === -1 || end < start) return null;
+
+      const parsed = JSON.parse(stderr.slice(start, end + 1)) as Record<string, string>;
+      const required = [
+        "input_i",
+        "input_tp",
+        "input_lra",
+        "input_thresh",
+        "target_offset",
+      ] as const;
+      for (const key of required) {
+        // "-inf" appears for silent input and would poison the second pass.
+        if (!parsed[key] || !Number.isFinite(Number.parseFloat(parsed[key]))) return null;
+      }
+
+      return {
+        input_i: parsed.input_i!,
+        input_tp: parsed.input_tp!,
+        input_lra: parsed.input_lra!,
+        input_thresh: parsed.input_thresh!,
+        target_offset: parsed.target_offset!,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Integrated loudness of the finished file, for the record rather than for
+   * control — `loudnorm` has already done the correcting. Stored so an operator
+   * can see what was actually delivered.
+   */
+  private async measureLoudness(
+    filePath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<number | null> {
+    try {
+      const { stderr } = await run(
+        this.ffmpeg,
+        ["-hide_banner", "-nostats", "-i", filePath, "-af", "ebur128", "-f", "null", "-"],
+        signal,
+        "Measuring loudness",
+      );
+      // ebur128 prints a summary block ending with "I: -14.0 LUFS".
+      const matches = [...stderr.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/g)];
+      const last = matches.at(-1)?.[1];
+      return last === undefined ? null : Math.round(Number.parseFloat(last) * 100) / 100;
+    } catch {
+      // A measurement is a nicety; never fail a good render over one.
+      return null;
+    }
+  }
+
+  private async probeDuration(filePath: string, signal: AbortSignal | undefined): Promise<number> {
+    try {
+      const { stderr } = await run(
+        this.ffprobe,
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=noprint_wrappers=1:nokey=1",
+          filePath,
+        ],
+        signal,
+        "Probing output",
+      );
+      const parsed = Number.parseFloat(stderr.trim());
+      return Number.isFinite(parsed) ? Math.round(parsed * 1000) / 1000 : 0;
+    } catch {
+      // A duration we cannot read is not worth failing a finished render over;
+      // the planned total is already stored alongside it.
+      return 0;
+    }
+  }
+}
+
+/**
+ * Greedy word wrap. drawtext renders newlines but will not wrap, so a long
+ * caption would otherwise run off both edges of the frame.
+ */
+export function wrapText(text: string, maxChars: number): string {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+
+  for (const word of words) {
+    if (!line) {
+      line = word;
+    } else if (`${line} ${word}`.length <= maxChars) {
+      line = `${line} ${word}`;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.join("\n");
+}

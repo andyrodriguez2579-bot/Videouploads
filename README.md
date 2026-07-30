@@ -13,7 +13,8 @@ review.
 uploaded anywhere without an explicit human approval, recorded against the exact
 script version approved.**
 
-Milestone 1 (the editorial foundation) is implemented. Milestones 2–5 are not.
+Milestone 1 (the editorial foundation) is implemented. Milestone 2 (rendering) is
+partly implemented: scenes render to a real MP4 locally. Milestones 3–5 are not.
 
 ---
 
@@ -27,7 +28,7 @@ The app runs end to end with **no paid API and no cloud account**:
 | Storage | Local filesystem | Cloudflare R2 / Amazon S3 |
 | Auth | Local email + password | Supabase Auth |
 | Narration | Upload your own file, or Piper (local) | ElevenLabs / OpenAI |
-| Subtitles | Upload SRT/VTT, or faster-whisper (local) | Hosted ASR |
+| Subtitles | Generated from the script, or import SRT/VTT | Hosted ASR |
 | Scene plan | Written by you | OpenAI / Anthropic |
 | Rendering | FFmpeg + Remotion, on your machine | — |
 | Publishing | Manual upload | Platform APIs |
@@ -45,7 +46,14 @@ the episode's Details tab. The target first workflow is:
 
 - **Node.js 20.11+** and npm
 - **Docker** (for local Postgres) — or any Postgres 14+ you already have
-- FFmpeg (only needed from Milestone 2)
+- **FFmpeg** (with `ffprobe`) — required to render. Debian/Ubuntu:
+  `apt-get install ffmpeg`; macOS: `brew install ffmpeg`. Set `FFMPEG_PATH` /
+  `FFPROBE_PATH` if they are not on `PATH`.
+- A font for on-screen text — any DejaVu, Liberation or FreeFont package.
+  Debian/Ubuntu: `apt-get install fonts-dejavu-core`.
+- **Redis — optional.** Without it renders run inside the app process; with it
+  they are queued to a worker that survives a restart. See
+  [Render jobs](#render-jobs).
 
 ## Quick start
 
@@ -92,6 +100,30 @@ step. The only extension required is `pgcrypto`, which the migration creates.
 docker compose --profile app up --build
 ```
 
+### Render jobs
+
+Rendering works out of the box with nothing extra running — the encode happens
+inside the app process. That is fine on a laptop; the only cost is that a
+restart mid-encode loses the render.
+
+For anything longer-lived, set `REDIS_URL` and run a worker:
+
+```bash
+docker compose --profile jobs up -d redis    # or your own Redis
+# .env: REDIS_URL=redis://localhost:6379
+npm run worker
+```
+
+Renders are then queued, survive restarts, and retry three times with backoff.
+A job whose process died is failed after 30 minutes with an explanation rather
+than sitting at `running` forever. The Settings page shows which mode is live.
+
+In containers, both at once:
+
+```bash
+docker compose --profile app --profile jobs up --build
+```
+
 ---
 
 ## What Milestone 1 does
@@ -107,7 +139,7 @@ docker compose --profile app up --build
 | `/review` | Built — review queue with per-episode blockers |
 | `/assets` | Built — asset library, licence records, uploads |
 | `/settings` | Built — environment and provider status, read-only |
-| `/renders` | Placeholder for Milestone 2 |
+| `/renders` | Built — render centre with per-job progress, errors and outputs |
 | `/calendar`, `/social` | Placeholder for Milestone 4 |
 | `/analytics` | Placeholder for Milestone 5 |
 
@@ -163,23 +195,49 @@ npm run env:check        # validate .env without starting the app
 npm run db:migrate       # apply drizzle/*.sql
 npm run db:seed          # owner/editor accounts + demo episode
 npm run db:reset         # DROP the public schema (development only)
-npm run test             # vitest — workflow rules
-npm run test:e2e         # playwright — approval workflow
+npm run test             # vitest — workflow and render-planning rules
+npm run test:e2e         # playwright — approval, uploads, rendering
+npm run render:sample    # render a demo MP4 with no database involved
+npm run worker           # render worker (only when REDIS_URL is set)
+./scripts/make-fixtures.sh   # regenerate binary test fixtures
+```
+
+`render:sample` is the quickest way to check the local FFmpeg toolchain:
+
+```bash
+npm run render:sample -- ./sample.mp4            # 16:9 colour cards
+npm run render:sample -- ./tall.mp4 9:16         # vertical
+npm run render:sample -- ./still.mp4 16:9 photo.jpg   # over a real still
 ```
 
 ## Testing
 
-**Unit** — [`src/domain/workflow.test.ts`](src/domain/workflow.test.ts) covers the
-state machine and every approval gate.
+**Unit** — [`src/domain/asset-source.test.ts`](src/domain/asset-source.test.ts)
+covers archive metadata parsing against recorded API responses;
+[`src/domain/subtitles.test.ts`](src/domain/subtitles.test.ts) covers
+cue timing, line breaking and SRT/VTT round-tripping;
+[`src/lib/env.test.ts`](src/lib/env.test.ts) covers the paired
+configuration requirements, including the upload ceiling;
+[`src/domain/workflow.test.ts`](src/domain/workflow.test.ts) covers the
+state machine and every approval gate;
+[`src/domain/render.test.ts`](src/domain/render.test.ts) covers scene timing,
+caption selection, aspect-ratio dimensions and the render warnings.
 
 ```bash
 npm run test
 ```
 
-**End to end** — [`tests/e2e/approval-workflow.spec.ts`](tests/e2e/approval-workflow.spec.ts)
-drives a real browser through: anonymous redirect, blocked submission, the full
-draft → review → approved path, approval withdrawal on script edit, and the
-editor-cannot-approve role gate. Needs a migrated and seeded database.
+**End to end** — three Playwright suites drive a real browser, against a migrated
+and seeded database:
+
+- [`approval-workflow.spec.ts`](tests/e2e/approval-workflow.spec.ts) — anonymous
+  redirect, blocked submission, the full draft → review → approved path, approval
+  withdrawal on script edit, and the editor-cannot-approve role gate.
+- [`asset-upload.spec.ts`](tests/e2e/asset-upload.spec.ts) — upload, storage,
+  read-back through the guarded file route, and its two refusals.
+- [`render.spec.ts`](tests/e2e/render.spec.ts) — renders an episode to an actual
+  MP4 and checks the served bytes really are one; uploads narration and checks
+  the picture is held to cover it. Needs FFmpeg.
 
 ```bash
 npm run test:e2e:install   # once
@@ -258,7 +316,7 @@ interactions work from the keyboard; nothing depends on hover or drag.
 Scaffolded the application by hand (Next.js 15 App Router, TypeScript, Tailwind,
 Drizzle, Zod) rather than via `create-next-app`, and implemented:
 
-- Full 17-table schema in `drizzle/0000_init.sql` with a custom SQL migration
+- Full 19-table schema in `drizzle/0000_init.sql` with a custom SQL migration
   runner that checksums applied files.
 - Local-first environment validation with paired-requirement checks (e.g.
   `STORAGE_DRIVER=s3` demands bucket and credentials).
@@ -320,11 +378,379 @@ The script is deliberately *not* copied, so an untranslated Spanish draft can
 never be mistaken for approved English copy. Translation graphs are kept one
 level deep so "the original" is never ambiguous.
 
-### Next — Milestone 2: rendering pipeline
+### 2026-07-28 — First full run of Milestone 1, and what it turned up
 
-Remotion templates, FFmpeg encoding and loudness normalisation, BullMQ + Redis
-jobs with progress and retry, local sample render with no paid API, subtitle
-import and faster-whisper generation.
+Milestone 1 had never actually been run end to end against a live database. Doing
+so — migrate, seed, build, boot, drive the browser — found four things.
+
+- **`/assets` rendered two elements with `id="kind"`**, one in the filter bar and
+  one in the upload form. Duplicate ids are invalid HTML and the label binds to
+  whichever comes first, so clicking "Kind" above the upload form focused the
+  *filter*. Anyone using the keyboard or a screen reader would have set the filter
+  believing they were setting the asset kind, and uploaded with the default kind
+  silently. The filter's ids are now prefixed (`filter-kind`, and its siblings for
+  consistency); the `name` attributes are untouched because they drive the query
+  string.
+- **The Playwright suite could not pass.** `getByRole("alert")` also matched the
+  empty route announcer Next injects at body level, and `getByText("Draft")` had
+  become ambiguous once the translation panel added prose containing the word. The
+  app was right in every one of those cases — only the selectors were wrong.
+- **`npm ci` in the Dockerfile had no lockfile to install from**, so the image
+  still could not build even after the lazy-connection fix. `package-lock.json` is
+  now committed, which also makes builds reproducible.
+- **Two upload forms passed `encType` alongside a function `action`**, which React
+  overrides with a warning.
+
+Uploads now have their own e2e coverage (`tests/e2e/asset-upload.spec.ts`), which
+is what should have caught the id collision: it asserts the upload form's label
+resolves to the upload form's control, that every id on the page is unique, that a
+file reaches storage and reads back byte-for-byte through `/api/files/*`, and that
+the route refuses both an unknown key and a signed-out caller.
+
+Verified green: typecheck, lint, 20 unit tests, production build, 10 e2e tests.
+
+### 2026-07-28 — Milestone 2, first slice: episodes render to real video
+
+An episode's scene plan now becomes a watchable MP4, entirely on the local
+machine. Scene → segment → concatenated film, in 16:9 or 9:16, with per-job
+progress, and the output served back through the same guarded route as uploads.
+
+**Decision: FFmpeg first, Remotion behind the same seam.** The milestone plan
+named Remotion, and it is still the right tool for motion and richer templates.
+It is also a large dependency that drives a headless browser, and its licence is
+not free for larger companies. Getting *watchable output* mattered more than
+getting the final renderer, so this slice encodes with FFmpeg alone, behind a
+`RenderProvider` interface that mirrors the existing auth and storage seams.
+`renders.template` already carries a per-render template id for the day Remotion
+lands beside it.
+
+**Decision: one segment per scene, not one filter graph.** Encoding each scene
+separately and concatenating with `-c copy` is what makes progress reporting and
+useful errors possible — a 40-scene episode reports 40 steps, and a failure names
+the scene that caused it rather than dumping an unreadable graph. Peak memory
+stays flat regardless of episode length.
+
+**Decision: rendering is not gated on approval.** Approval governs *publishing*;
+you cannot sensibly approve a cut you have never watched. What a render does
+record is the script version it was built from, so an approved episode can never
+be confused with a render of a later draft. The only thing that blocks a render
+is having no scenes. Runtime drift against the series target warns, exactly as it
+does in review.
+
+Text is passed to `drawtext` via `textfile=` rather than inline. Headings
+legitimately contain colons, apostrophes and commas — all filter-graph
+metacharacters — and escaping them by hand is the kind of thing that works until
+someone writes a real title.
+
+Rendering surfaced one integration gap: `/api/files/*` only served keys backed by
+a `media_assets` row, so a finished render 404ed. That guard was right to refuse
+— it now resolves renders too, and nothing else.
+
+Verified from a clean database: typecheck, lint, 41 unit tests, production build,
+13 e2e tests including one that renders an actual MP4 and asserts the served
+bytes carry an `ftyp` box.
+
+### 2026-07-28 — Milestone 2, second slice: durable render jobs
+
+Renders can now go through BullMQ + Redis and survive a restart.
+
+**Decision: Redis stays optional.** Making it required would have broken the
+promise this project is built on — that the whole thing runs with no extra
+services. So `REDIS_URL` selects the behaviour and nothing else in the codebase
+changes shape:
+
+| `REDIS_URL` | Where a render runs | Cost |
+|---|---|---|
+| unset | in the app process | nothing to run; a restart mid-encode loses it |
+| set | BullMQ worker (`npm run worker`) | survives restarts, retries 3× with backoff |
+
+The Settings page states which mode is live in those words, rather than making
+an operator infer it from "(set)".
+
+**Stale-render reclaim.** A job left `running` by a process that died is failed
+after 30 minutes with an explanation, on worker start. Only `running` is
+reclaimed, never `queued` — with a worker configured a job legitimately waits in
+`queued`, and failing those would break the durability this exists to add.
+Progress updates keep `updated_at` moving, so a live render is never mistaken
+for a dead one; verified against a live database with one dead and one healthy
+render, which reclaimed exactly one.
+
+The worker imports the same `server-only`-guarded modules the app uses, via
+Node's `react-server` resolve condition (`tsx --conditions=react-server`). No
+parallel copy of the orchestration, and the guard still protects the client
+bundle.
+
+Two things this slice found:
+
+- **The Docker image had ffmpeg but no fonts.** `drawtext` needs a real font
+  file, and the slim base ships none, so every containerised render would have
+  failed at the moment it drew a heading. `fonts-dejavu-core` is now installed
+  beside ffmpeg.
+- **BullMQ pulls an optional Valkey client** that is not installed, which put
+  `Can't resolve @valkey/valkey-glide` warnings on every build. `bullmq` and
+  `ioredis` are now server-external — that noise is where a real module error
+  goes to hide.
+
+### 2026-07-28 — Milestone 2, third slice: narration
+
+Upload a recording on the Production tab and the next render lays it under the
+picture, normalised in one pass over the whole programme.
+
+**Decision: −14 LUFS, not −16 or −23.** YouTube normalises uploads to roughly
+−14 LUFS. Delivering at that target means the platform leaves the mix alone
+instead of pulling it down and flattening whatever dynamics were chosen. True
+peak is capped at −1.5 dBTP so lossy transcodes do not clip.
+
+**Decision: the picture stretches, the narration never gets cut.** If a
+recording outlasts the scene plan the final scene is held until it finishes. A
+picture that lingers is a stylistic wrinkle; a word clipped off mid-sentence is
+a defect. `-shortest` is deliberately absent from the mix command for the same
+reason. The plan warns in both directions — narration running well past the
+scene plan, or a plan long enough that the film ends in silence.
+
+Loudness is normalised once over the finished programme rather than per segment,
+because integrated loudness only means anything at programme level. The measured
+result is stored on both the render and the voiceover, so the delivered figure is
+visible without re-probing the file.
+
+Duration is read with `ffprobe` at *upload* time, not render time: the scene plan
+is fitted to it, and an editor needs that number while they are still editing.
+
+Verified end to end: a 2-second scene plan with 12 seconds of narration produced
+a 12.05s film with an AAC stereo track measuring exactly −14.0 LUFS, from a
+source deliberately 24 dB down.
+
+One thing this slice re-taught: the narration panel's own copy contains the word
+"render", which broke the e2e selector that located the render panel by prose.
+Panels are now located by heading. That is the same ambiguity that bit
+`getByText("Draft")` two slices ago — body copy is not an identifier.
+
+### 2026-07-28 — What a real human voice changed
+
+The narration path had only ever been tested with a generated tone. A 33-second
+Spanish take from an actual narrator, recorded on a phone, exposed two things a
+constant tone cannot.
+
+**Loudness normalisation needed two passes.** Single-pass `loudnorm` works
+forward through the file and can only estimate; on a steady tone that estimate
+is perfect, on speech it landed 1.8 LU under target. Measuring first
+(`print_format=json`) and feeding the numbers back halved the error. The
+remainder is the true-peak ceiling doing its job — the output measures −14.8
+LUFS with peaks at −3.5 dBFS, inside the ±1 LU that EBU R128 and YouTube both
+work to, with her dynamics intact (LRA 4.3 LU).
+
+**A dead Redis hung the request instead of failing it.** BullMQ needs
+`maxRetriesPerRequest: null` so a *worker* never abandons its blocking wait —
+but the same setting on the *producer* means `queue.add()` retries forever
+rather than rejecting, so clicking "Start render" hung the web request. Producer
+and consumer now get opposite connections: bounded retries and
+`enableOfflineQueue: false` for the producer, unbounded for the worker, plus an
+8-second ceiling on the handoff and a cache reset so one outage at startup
+cannot poison every later render. Verified with Redis stopped: fails in 621 ms
+with a readable message.
+
+Both were found by testing with real material rather than a fixture. Neither was
+reachable from the test suite as written.
+
+### 2026-07-28 — The upload ceiling was a promise the app could not keep
+
+`MAX_UPLOAD_MB` defaulted to 512, but server actions — which is how every upload
+arrives — were capped at 128 MB in `next.config.mjs`. Nothing reconciled the
+two, so a file between those numbers died with an opaque error, at precisely the
+worst moment: someone uploading the take they just spent an hour recording.
+
+128 MB stays as the real ceiling, because a server action buffers the whole body
+in memory. It is comfortably enough for lossless narration — ten minutes of mono
+24-bit/48 kHz is ~86 MB as WAV, ~50 MB as FLAC. `MAX_UPLOAD_MB` now defaults to
+match, and the environment schema refuses to start if it is raised above the
+body limit, naming both places that have to change together. The number is
+declared once in `src/lib/env.ts` and mirrored in `next.config.mjs`, which the
+bundler loads and the app cannot import.
+
+### 2026-07-28 — Per-scene narration
+
+Narration can now be recorded scene by scene, so a fluffed line means
+re-recording that scene rather than the whole episode. Over a long series that
+is the difference between a pleasant session and a miserable one.
+
+**Each scene is timed to its own line**, with the planned estimate acting as a
+floor rather than a ceiling — a short line on a scene meant to breathe still
+gets the length someone deliberately planned for it. A 0.4s tail follows each
+line, because cutting on the last syllable reads as a mistake; short enough that
+forty scenes do not accumulate into dead air.
+
+**Per-scene wins over a whole-episode recording**, and says so. Mixing both
+would overlap, and silently picking one is how someone spends an afternoon
+wondering why a re-record changed nothing. Scenes left without narration are
+called out too, rather than quietly playing silent.
+
+Each segment now carries its own audio through the concat, so the loudness pass
+normalises what is already in the film rather than mixing a track over it. That
+path lands closer to target than the episode-level mix — a real run measured
+−13.9 LUFS against a −14 target.
+
+**A test passed while the render was wrong.** The first per-scene e2e asserted
+"0:14" against the whole Render panel, which also prints the *planned* runtime —
+so it matched the plan while the actual file was four seconds long and silent.
+Assertions now target the finished render's own row, which shows the duration
+ffprobe read back off the file, and check the payload is too large to be silence.
+A test that can pass without the feature working is worse than no test.
+
+### 2026-07-28 — Subtitles, generated from the script
+
+**Decision: generate from the script, do not transcribe.** Speech recognition
+exists to discover what was said. Here that is already known — written down,
+reviewed and approved. Running the narration through ASR would take text that is
+correct by construction and introduce errors into it, and the errors it makes are
+exactly the words this series cannot afford to get wrong: place names and people.
+faster-whisper earns its place later for *timing within* a scene, not for words.
+
+Cue timings come from the same render plan the video is built from, so a subtitle
+cannot drift onto the wrong picture: change a scene's length and the cues move
+with it.
+
+The line-breaking rules are the conventional ones — 42 characters a line, two
+lines a cue, 17 characters per second of reading time, and cues that neither
+flash nor outstay their welcome. Breaks are chosen at sentence ends first, then
+clause boundaries, and only mid-clause as a last resort, because a subtitle
+broken mid-thought is harder to read than a slightly long one.
+
+Both delivery routes are supported, because they are for different places. The
+`.srt` sidecar is for YouTube, where viewers can turn it off and the platform
+indexes the text. Burned-in captions are for silent-autoplay feeds, and are a
+per-render choice rather than a default.
+
+Generated captions are never marked reviewed. The words are right by
+construction; where lines break and how long they hold are judgements a machine
+should not sign off.
+
+Three things only a rendered frame revealed:
+
+- **Burned-in subtitles came out roughly four times too large**, filling the
+  frame. ffmpeg converts an SRT to ASS on a 384×288 virtual canvas, so
+  `force_style` sizes are in *those* units, not pixels — treating them as pixels
+  on a 1080p frame magnifies everything 3.75×. Sizes are now expressed against
+  that canvas, which also makes one set of numbers correct for 16:9 and 9:16.
+- **The subtitle box never drew.** With `BorderStyle=3` libass fills from
+  `OutlineColour`, sized by `Outline` — not from `BackColour`. `Outline=0` meant
+  no box, which is invisible over a bright archival still.
+- **The same sentence appeared twice.** A scene with no on-screen text borrows
+  its narration for the lower third, which with subtitles burned in printed the
+  line as a caption *and* as a subtitle. The caption is now suppressed when
+  captions are being drawn.
+
+### 2026-07-29 — Importing archival images by URL
+
+Paste a Wikimedia Commons file page, a loc.gov item, or a direct image link, and
+the app downloads the largest rendition and files a licence record built from the
+archive's own metadata: creator, date, rights wording, holding institution,
+catalogue reference.
+
+The point is the licence record, not the download. Fetching an image is trivial;
+what makes forty images an episode sustainable is not retyping forty citations.
+
+**Decision: an import never clears a licence.** The archive told us what it
+believes about the item. It did not tell us the rights are cleared for this use,
+"no known restrictions" is a curator's assessment rather than a guarantee, and
+public-domain status varies by jurisdiction. Every import lands uncleared, with
+the archive's wording stored verbatim and a note saying rights are unverified —
+so the approval gate this whole app is built around still has to be satisfied by
+a person who looked.
+
+The licence type is *guessed* from the archive's wording only where it is
+unambiguous, and left `unknown` otherwise. A wrong guess is worse than none,
+because it looks like a decision was made.
+
+Two details worth recording:
+
+- **Downloads are size-checked twice**, against `Content-Length` and again while
+  streaming. A server can understate or omit the header, and archive masters run
+  to hundreds of megabytes — without the second check one URL could exhaust
+  memory.
+- **JP2 masters are skipped** even when they are the largest file. They are often
+  the highest resolution on offer, and neither ffmpeg nor a browser can read one.
+  An unusable file is worse than a smaller usable one.
+
+Verified against the live APIs: Boazio's 1588 map of Drake's siege of Santo
+Domingo came back at 7174×6588, 5 MB, credited to the Bibliothèque nationale de
+France, licence recorded and left uncleared.
+
+### 2026-07-30 — Searching the national library from inside the app
+
+The episode's Sources tab can now search the **Biblioteca Nacional Pedro
+Henríquez Ureña**'s digital library and file a citation against the episode:
+author, publisher, place, year, series, extent and shelf reference, as the
+library's own cataloguers recorded them.
+
+**What this is not: an image source.** The catalogue runs DSpace 7, and probing
+it settled the question — search and metadata are public, but a bitstream
+request returns `401`. The scans cannot be downloaded, so this fills
+`research_sources` and nothing else. Every result links back to the library,
+because the reading still happens on their site.
+
+Two decisions worth recording:
+
+- **The catalogue's own `dc.identifier.citation` wins** when it exists. A
+  librarian formatted it, and it will be more correct than anything reassembled
+  from separate Dublin Core fields. The reassembled form is a fallback, not the
+  default.
+- **Imports are always `unverified`,** which is the entire point of that field.
+  A catalogue can tell you a book exists and roughly what it covers; it cannot
+  tell you it supports the sentence you wrote. `inferSourceType` is deliberately
+  conservative for the same reason — anything not plainly archival maps to
+  `secondary`, because calling a secondary work *primary* overstates the
+  evidence behind a claim, and that is the one error the field exists to
+  prevent.
+
+Verified end to end against the live catalogue: a search for "Drake Santo
+Domingo 1586" returns Rodríguez Demorizi's *Relaciones históricas de Santo
+Domingo* (1945, Editora Montalvo, `BNPHU/2970`), which collects documents on
+the 1586 invasion; importing it writes one `research_sources` row marked
+unverified, and importing it a second time returns the existing row rather than
+duplicating the citation.
+
+### 2026-07-30 — Browsing a Commons category
+
+Pasting a Commons **category** page now lists what is in it — thumbnail,
+creator, date, dimensions and licence for each file — and imports the ticked
+ones. Each goes through the same path as a single-URL import, licence record
+and all.
+
+This closes a real gap: a category page is how Commons is actually searched.
+You land on "Historical images of the Dominican Republic", not on forty
+separate file pages, and the importer used to reject that URL outright. It now
+also says where a category URL belongs when one is pasted into the single-file
+box, instead of only refusing it.
+
+Two decisions worth recording:
+
+- **Sub-categories are listed but never followed.** Commons categories nest
+  deeply and drift off-subject as they go, so recursing would quietly import
+  images nobody chose. They are shown as links so the person decides where to
+  look next.
+- **Imports run one at a time.** These are multi-megabyte archive masters, and
+  firing a dozen downloads at once would spike memory and hammer an API whose
+  policy asks callers not to. One failure does not abandon the rest — the
+  summary says which were skipped and why.
+
+A smaller fix fell out of testing at scale: Commons' `Credit` field is often
+nothing but external links, which strip down to `[1] , [2]`. That is not a
+rights holder, and it would have been printed as an on-screen credit. A credit
+containing no letters is now dropped, with the archive's verbatim wording still
+kept in the rights statement.
+
+Verified against the live API and in a browser: the Dominican Republic category
+lists 9 files across CC BY 2.0, CC BY-SA 4.0 and public domain, offers its 3
+sub-categories as links, and importing one downloads the full 1600×2648 master
+with an **uncleared** licence record.
+
+### Next — the rest of Milestone 2
+
+- **Local narration generation** with Piper, as an alternative to recording.
+- **faster-whisper** for timing cues against the audio, for reads that depart
+  from the script.
+- **Richer templates** — Ken Burns motion on stills, and per-template layouts
+  rather than one shared lower-third.
 
 ---
 

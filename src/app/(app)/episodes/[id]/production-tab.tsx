@@ -1,4 +1,11 @@
-import { Badge, EmptyState, MilestoneNotice } from "@/components/ui";
+import { MilestoneNotice } from "@/components/ui";
+import {
+  NarrationPanel,
+  type SceneNarrationRow,
+  type VoiceoverRow,
+} from "./narration-panel";
+import { CaptionsPanel, type CaptionRow } from "./captions-panel";
+import { RenderPanel, type RenderRow } from "./render-panel";
 import {
   CAPTION_MODE_LABELS,
   NARRATION_MODE_LABELS,
@@ -7,42 +14,56 @@ import {
 } from "@/domain/types";
 
 /**
- * Milestone 1 shows the narration and caption records that exist and the mode
- * chosen for this episode. Uploading narration/subtitle files and generating
- * them locally (Piper / faster-whisper) lands with the render pipeline in M2,
- * where the audio can be probed and loudness-normalised in the same job.
+ * Where an episode becomes a film: narration in, render out.
+ *
+ * Narration upload and rendering are live. Subtitles and locally generated
+ * narration (faster-whisper, Piper) are still to come, and say so rather than
+ * pretending to work.
  */
 export function ProductionTab({
+  episodeId,
   narrationMode,
   captionMode,
   voiceovers,
   captions,
-  renderCount,
+  sceneNarration,
+  renders,
+  renderPlan,
 }: {
   episodeId: string;
   narrationMode: NarrationMode;
   captionMode: CaptionMode;
-  voiceovers: {
-    id: string;
-    source: string;
-    provider: string | null;
-    objectKey: string | null;
-    durationSeconds: string | null;
-    status: string;
-    isSelected: boolean;
-  }[];
-  captions: {
-    id: string;
-    format: string;
-    source: string;
-    cueCount: number | null;
-    status: string;
-    humanReviewed: boolean;
-  }[];
-  renderCount: number;
+  voiceovers: VoiceoverRow[];
+  sceneNarration: SceneNarrationRow[];
+  captions: CaptionRow[];
+  renders: RenderRow[];
+  renderPlan: {
+    plannedSeconds: number;
+    sceneCount: number;
+    canRender: boolean;
+    blockers: string[];
+    warnings: string[];
+  };
 }) {
   return (
     <div className="space-y-6">
+      <NarrationPanel
+        episodeId={episodeId}
+        voiceovers={voiceovers}
+        scenes={sceneNarration}
+      />
+
+      <CaptionsPanel episodeId={episodeId} captions={captions} />
+
+      <RenderPanel
+        episodeId={episodeId}
+        renders={renders}
+        plannedSeconds={renderPlan.plannedSeconds}
+        sceneCount={renderPlan.sceneCount}
+        canRender={renderPlan.canRender}
+        blockers={renderPlan.blockers}
+        warnings={renderPlan.warnings}
+      />
       <section className="card">
         <h2 className="mb-3 font-serif text-lg font-semibold">Chosen method</h2>
         <dl className="grid gap-3 sm:grid-cols-2 text-sm">
@@ -60,64 +81,11 @@ export function ProductionTab({
         </p>
       </section>
 
-      <section className="card">
-        <h2 className="mb-3 font-serif text-lg font-semibold">Narration tracks</h2>
-        {voiceovers.length === 0 ? (
-          <EmptyState
-            title="No narration recorded"
-            description="Narration upload and local Piper generation arrive with the render pipeline."
-          />
-        ) : (
-          <ul className="divide-y divide-black/10 text-sm">
-            {voiceovers.map((v) => (
-              <li key={v.id} className="flex items-center justify-between gap-2 py-2.5">
-                <span>
-                  {v.source}
-                  {v.provider ? ` · ${v.provider}` : ""}
-                  {v.durationSeconds ? ` · ${v.durationSeconds}s` : ""}
-                </span>
-                <span className="flex gap-1.5">
-                  {v.isSelected ? <Badge tone="good">Selected</Badge> : null}
-                  <Badge>{v.status}</Badge>
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="card">
-        <h2 className="mb-3 font-serif text-lg font-semibold">Subtitles</h2>
-        {captions.length === 0 ? (
-          <EmptyState
-            title="No subtitle files"
-            description="Import an SRT/VTT, or generate them locally with faster-whisper, in Milestone 2."
-          />
-        ) : (
-          <ul className="divide-y divide-black/10 text-sm">
-            {captions.map((c) => (
-              <li key={c.id} className="flex items-center justify-between gap-2 py-2.5">
-                <span>
-                  {c.format.toUpperCase()} · {c.source}
-                  {c.cueCount ? ` · ${c.cueCount} cues` : ""}
-                </span>
-                <span className="flex gap-1.5">
-                  <Badge tone={c.humanReviewed ? "good" : "warn"}>
-                    {c.humanReviewed ? "Reviewed" : "Unreviewed"}
-                  </Badge>
-                  <Badge>{c.status}</Badge>
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <MilestoneNotice milestone="Milestone 2">
+      <MilestoneNotice milestone="Milestone 2 — still to come">
         <p>
-          Rendering is not built yet. This episode has {renderCount} render record(s). The pipeline
-          will use FFmpeg and Remotion locally — no paid service — driven by BullMQ jobs with
-          progress and retry surfaced in the Render center.
+          Narration can also be generated locally with Piper rather than recorded, and
+          faster-whisper can time subtitles from the audio when a read departs from the script.
+          Neither is built yet.
         </p>
       </MilestoneNotice>
     </div>

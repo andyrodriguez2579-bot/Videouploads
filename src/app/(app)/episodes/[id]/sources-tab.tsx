@@ -10,6 +10,8 @@ import type { ActionState } from "@/lib/action-state";
 
 import { addSourceAction, deleteSourceAction, setSourceVerificationAction } from "../actions";
 
+import { LibraryPanel } from "./library-panel";
+
 interface SourceRow {
   id: string;
   citation: string;
@@ -47,6 +49,8 @@ export function SourcesTab({ episodeId, sources }: { episodeId: string; sources:
 
   return (
     <div className="space-y-6">
+      <LibraryPanel episodeId={episodeId} />
+
       <section className="card">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-serif text-lg font-semibold">Research sources</h2>
